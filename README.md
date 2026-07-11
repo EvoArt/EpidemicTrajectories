@@ -52,14 +52,15 @@ trajectory_loglik(pars, model, data)        # differentiable in `pars`
 
 The same model can be written with the `@transitions` macro:
 
+Rates are written as bare expressions that refer to the rate-function arguments
+by name (`pars`, `model`, `data`, `i`, `t` in the per-individual style):
+
 ```julia
 si = @transitions :individual SI begin
-    S -> I = (pars, model, data, i, t) -> begin
-        g = data.group[i]
-        I₋ = count(j -> j != i && data.states[j, t] == 1, data.members(data, g))
-        -expm1(-(pars.α + pars.β * I₋))
-    end
-    I -> S = (pars, model, data, i, t) -> 1 / pars.m
+    S -> I = -expm1(-(pars.α + pars.β *
+                      count(j -> j != i && data.states[j, t] == 1,
+                            data.members(data, data.group[i]))))
+    I -> S = 1 / pars.m
 end
 ```
 

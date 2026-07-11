@@ -68,20 +68,36 @@ end
     @test chain_binomial_loglik(pars, m, counts, events) ≈ ref rtol=1e-10
 end
 
-@testset "transition-matrix style: @transitions macro (simple)" begin
+@testset "transition-matrix style: @transitions macro (simple, bare rate expr)" begin
+    # bare rate expressions — no `-> ` lambda; `pars`, `counts`, `t` are in scope.
     si = @transitions SI begin
-        S -> I = (pars, counts, t) -> -expm1(-(pars.α + pars.β * counts[2]))
-        I -> S = (pars, counts, t) -> 1 / pars.m
+        S -> I = -expm1(-(pars.α + pars.β * counts[2]))
+        I -> S = 1 / pars.m
     end
     @test si isa SimpleEpiTransitionMatrix
     @test si.transitions == [(0, 1), (1, 0)]
 
-    # equivalence with a hand-built model
     pars = (; α=0.02, β=0.03, m=4.0)
     rng = StableRNG(9)
     counts, events = simulate_chain_binomial(rng, si, pars, [20, 3]; n_times=15)
     lp = chain_binomial_loglik(pars, si, counts, events)
     @test isfinite(lp)
+
+    # the bare form is equivalent to a hand-built model with explicit closures
+    ref = SimpleEpiTransitionMatrix(
+        state_space=SI, transitions=[(0, 1), (1, 0)],
+        rates=[(pars, counts, t) -> -expm1(-(pars.α + pars.β * counts[2])),
+               (pars, counts, t) -> 1 / pars.m],
+    )
+    counts2, events2 = simulate_chain_binomial(StableRNG(9), ref, pars, [20, 3]; n_times=15)
+    @test chain_binomial_loglik(pars, si, counts, events) ≈ chain_binomial_loglik(pars, ref, counts2, events2)
+
+    # an explicit lambda is still accepted (for multi-line bodies etc.)
+    si_lambda = @transitions SI begin
+        S -> I = (pars, counts, t) -> -expm1(-(pars.α + pars.β * counts[2]))
+        I -> S = 1 / pars.m
+    end
+    @test si_lambda isa SimpleEpiTransitionMatrix
 end
 
 @testset "transition-matrix style: EpiTransitionMatrix drives functional machinery" begin
@@ -89,6 +105,7 @@ end
     # infection rate depend on a per-individual covariate `data.susceptibility[i]`
     # — something the count-based SimpleEpiTransitionMatrix CANNOT express — to
     # demonstrate the strictly-more-general seam.
+    # explicit lambda for the multi-line S->I body; bare expression for I->S.
     m = @transitions :individual SI begin
         S -> I = (pars, model, data, i, t) -> begin
             g = data.group[i]
@@ -96,7 +113,7 @@ end
             frailty = data.susceptibility[i]
             -expm1(-frailty * (pars.α + pars.β * I_minus))
         end
-        I -> S = (pars, model, data, i, t) -> 1 / pars.m
+        I -> S = 1 / pars.m
     end
     @test m isa EpiTransitionMatrix
 

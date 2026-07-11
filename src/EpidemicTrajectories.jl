@@ -27,8 +27,8 @@ module EpidemicTrajectories
 #     This is the "iFFBS paper" way, closest to bespoke per-individual
 #     capture-recapture models (see `rates.jl`, `iffbs.jl`).
 #
-#   * TRANSITION-MATRIX style (`transition_matrix.jl`, gemlib-esque): you supply
-#     a state-transition structure (an incidence/stoichiometry matrix + a rate
+#   * TRANSITION-MATRIX style (`transition_matrix.jl`): you supply a
+#     state-transition structure (an incidence/stoichiometry matrix + a rate
 #     for each transition) and get simulate + log-likelihood for free. Good for
 #     compartmental (population-level) chain-binomial models.
 #
@@ -61,7 +61,7 @@ export simulate_trajectory, simulate_observations
 export trajectory_loglik
 export ffbs_individual!, ffbs_sweep!
 
-# Transition-matrix (gemlib-esque) style
+# Transition-matrix style
 export SimpleEpiTransitionMatrix, EpiTransitionMatrix, StateTransitionModel
 export @transitions, incidence_matrix, chain_binomial_loglik, simulate_chain_binomial
 

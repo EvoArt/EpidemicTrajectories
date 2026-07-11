@@ -1,10 +1,10 @@
-# Transition-matrix ("gemlib-esque") model specification.
+# Transition-matrix model specification.
 #
 # Where the functional `RateBundle` describes per-INDIVIDUAL transitions, the
 # transition-matrix style describes the state-to-state transitions of a
 # compartmental system directly: a list of allowed `(from, to)` transitions, each
-# with a rate. This mirrors gemlib's `DiscreteTimeStateTransitionModel` (incidence
-# matrix + rate functions -> simulate + logprob).
+# with a rate. An incidence/stoichiometry matrix plus a rate per transition gives
+# both a simulator and a log-likelihood.
 #
 # TWO levels of generality (per the package's naming convention):
 #
@@ -36,8 +36,8 @@
 """
     SimpleEpiTransitionMatrix(; state_space, transitions, rates)
 
-A compartmental, gemlib-style discrete-time state-transition model whose
-transition rates are PURE functions of the compartment counts: each element of
+A compartmental discrete-time state-transition model whose transition rates are
+pure functions of the compartment counts: each element of
 `rates` is `rate(pars, counts, t) -> per-capita per-step transition PROBABILITY`,
 where `counts` is the current dense-state count vector and `t` the time step.
 `transitions` is a vector of `(from_code, to_code)` pairs; `state_space` is the

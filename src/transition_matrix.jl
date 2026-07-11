@@ -124,24 +124,33 @@ end
     end
 
 Modelling-language front-end for building a transition-matrix model. Each line
-`A -> B = rate` declares a transition from state `A` to state `B` with the given
-`rate` expression. The state names `A`, `B` must be the `names` of the supplied
-`state_space` (a [`StateSpace`](@ref) whose `names` are set); they are resolved
-to state codes automatically.
+`A -> B = rate` declares a transition from state `A` to state `B`. The state
+names `A`, `B` must be the `names` of the supplied `state_space` (a
+[`StateSpace`](@ref) whose `names` are set); they are resolved to state codes
+automatically.
 
-By default this builds a [`SimpleEpiTransitionMatrix`](@ref) (rates are
-`f(pars, counts, t)`). Pass `style=:individual` as a leading argument to build an
-[`EpiTransitionMatrix`](@ref) instead (rates are `f(pars, model, data, i, t)`):
+The `rate` is written as a bare expression referring to the rate-function
+arguments by name — no `-> ` lambda needed. Those arguments are `pars`,
+`counts`, `t` for the default count-based style, and `pars`, `model`, `data`,
+`i`, `t` for the per-individual style. An explicit lambda is still accepted for
+rates that need a multi-line body.
 
-    @transitions :individual ss begin
-        S -> I = (pars, model, data, i, t) -> ...
-    end
+By default this builds a [`SimpleEpiTransitionMatrix`](@ref). Pass `:individual`
+as a leading argument to build an [`EpiTransitionMatrix`](@ref) instead, whose
+rates can depend on individual identity, covariates, or history.
 
-# Example
+# Examples
 ```julia
+# count-based (chain binomial): rate expressions see `pars`, `counts`, `t`
 si = @transitions SI begin
-    S -> I = (pars, counts, t) -> -expm1(-(pars.α + pars.β * counts[2]))
-    I -> S = (pars, counts, t) -> 1 / pars.m
+    S -> I = -expm1(-(pars.α + pars.β * counts[2]))
+    I -> S = 1 / pars.m
+end
+
+# per-individual: rate expressions see `pars`, `model`, `data`, `i`, `t`
+si2 = @transitions :individual SI begin
+    S -> I = -expm1(-(pars.α + pars.β * count_infected_penmates(data, i, t)))
+    I -> S = 1 / pars.m
 end
 ```
 """
@@ -187,7 +196,14 @@ macro transitions(args...)
         rate = assign.args[2]
         push!(froms, from)
         push!(tos, to)
-        push!(rate_exprs, rate)
+        # Auto-wrap a bare rate expression in a rate function with the standard
+        # argument names in scope. `I -> S = 1 / pars.m` becomes a full
+        # `(pars, counts, t) -> 1 / pars.m` (simple style) or
+        # `(pars, model, data, i, t) -> 1 / pars.m` (individual style). If the
+        # user already wrote an explicit lambda (`= (pars, ...) -> ...`), it is
+        # used unchanged, so full control is still available for rates that need
+        # a multi-line body or unusual argument handling.
+        push!(rate_exprs, _wrap_rate(rate, style))
     end
 
     quote
@@ -203,6 +219,21 @@ macro transitions(args...)
         $(style == :individual ? :(EpiTransitionMatrix(; state_space=ss, transitions=transitions, rates=rates)) :
                                  :(SimpleEpiTransitionMatrix(; state_space=ss, transitions=transitions, rates=rates)))
     end
+end
+
+# Wrap a rate expression in a rate function unless it is already an explicit
+# lambda. The injected argument names are the ones the transition-matrix
+# machinery calls each rate with: `(pars, counts, t)` for the count-based simple
+# style, `(pars, model, data, i, t)` for the per-individual style. So a bare
+# `1 / pars.m` (referencing whichever of these it needs) becomes a complete rate
+# function, while an explicit `(pars, ...) -> ...` is passed through untouched.
+function _wrap_rate(rate, style::Symbol)
+    # already a lambda (`args -> body`): use as written.
+    rate isa Expr && rate.head == :-> && return rate
+    argtuple = style == :individual ?
+        Expr(:tuple, :pars, :model, :data, :i, :t) :
+        Expr(:tuple, :pars, :counts, :t)
+    return Expr(:->, argtuple, rate)
 end
 
 # ---------------------------------------------------------------------------

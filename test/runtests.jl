@@ -8,5 +8,6 @@ using Statistics: mean
     include("compartments.jl")
     include("functional_style.jl")
     include("transition_matrix_style.jl")
+    include("interface.jl")
     include("consistency.jl")
 end

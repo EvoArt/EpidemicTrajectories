@@ -46,6 +46,10 @@ include("simulate.jl")
 include("likelihood.jl")
 include("iffbs.jl")
 include("transition_matrix.jl")
+include("interface.jl")
+
+# High-level entry point: bundle a model and get loglik/simulate/latent! closures
+export epidemic_model, EpidemicModel, build_data, EpidemicData
 
 # Compartment / state-space
 export StateSpace, SI, SIS, SEID, nstates, state_index

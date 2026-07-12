@@ -1,5 +1,14 @@
 # API
 
+## High-level entry point
+
+```@docs
+epidemic_model
+EpidemicModel
+build_data
+EpidemicData
+```
+
 ## State spaces
 
 ```@docs

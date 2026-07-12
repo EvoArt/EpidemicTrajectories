@@ -1,5 +1,7 @@
 # EpidemicTrajectories.jl
 
+[![Docs](https://img.shields.io/badge/docs-dev-blue.svg)](https://evoart.github.io/EpidemicTrajectories/dev/)
+
 Discrete-time, individual-level epidemic models, built from three pieces:
 
 1. a **simulator** that draws hidden state trajectories forward in time,

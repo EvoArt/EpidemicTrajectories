@@ -32,16 +32,17 @@ jobs:
 
       - uses: julia-actions/cache@v2
 
-      # PracticalBayes is not registered, so the docs environment develops it
-      # from its GitHub repository (the tutorial fits a model with it). This
-      # package itself is developed from the checkout.
+      # PracticalBayes is not registered, so the docs environment adds it from
+      # its GitHub repository (the tutorial fits a model with it) and develops
+      # this package from the checkout. add/develop resolve the manifest, so no
+      # separate instantiate is needed (and instantiate would try to resolve the
+      # unregistered PracticalBayes from a registry and fail).
       - name: Install docs environment
         run: |
           julia --project=docs -e '
             using Pkg
-            Pkg.develop(PackageSpec(path=pwd()))
             Pkg.add(PackageSpec(url="https://github.com/EvoArt/PracticalBayes.git"))
-            Pkg.instantiate()'
+            Pkg.develop(PackageSpec(path=pwd()))'
 
       - name: Build and deploy docs
         env:

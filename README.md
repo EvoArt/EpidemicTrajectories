@@ -37,22 +37,29 @@ The two-state susceptible/infected model of Touloupou et al. (2019): each animal
 is susceptible or infected, with recurrent `S → I` and `I → S` transitions (no
 recovered compartment).
 
+A model is described in three parts: `model` (the parameters), `X` (the latent
+trajectory), and `data` (the observations plus group structure).
+`epidemic_model` bundles the fixed structure and returns three functions —
+`loglik`, `simulate`, and `latent!` — to plug into a PPL:
+
 ```julia
 using EpidemicTrajectories, Random
 
-rates = TwoStateSI()                        # S→I: 1 − exp(−(α + β·I₋)); I→S: 1/m
-pars  = (; α = 0.01, β = 0.02, m = 6.0)
 group = repeat(1:10; inner = 8)             # ten pens of eight animals
+rams  = DiagnosticTest(; sensitivity = p -> p.θ)
 
-states, data = simulate_trajectory(
-    Random.default_rng(), SI, rates, pars, group, [0.9, 0.1]; n_times = 80,
-)
+em   = epidemic_model(SI, TwoStateSI(); tests = (rams,))
+data = build_data(em, group; observations = (Rmask,), initial_prob = [0.9, 0.1])
 
-model = (; state_space = SI, rates = rates, pars = pars)
-trajectory_loglik(pars, model, data)        # differentiable in `pars`
+pars = (; α = 0.01, β = 0.02, m = 6.0, θ = 0.8)
+X    = zeros(Int, 80, 80)                   # latent trajectory (filled by latent!)
+
+em.loglik(pars, X, data)                    # differentiable in `pars`; @addlogprob! this
+em.latent!(rng, pars, X, data)              # one iFFBS sweep, resamples X in place
+em.simulate(rng, pars, data)                # draw a trajectory and observations
 ```
 
-The same model can be written with the `@transitions` macro:
+The rate functions can also be written with the `@transitions` macro:
 
 Rates are written as bare expressions that refer to the rate-function arguments
 by name (`pars`, `model`, `data`, `i`, `t` in the per-individual style):

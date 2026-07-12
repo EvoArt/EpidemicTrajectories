@@ -26,8 +26,8 @@ using Random
 using AdvancedHMC: NUTS
 import AbstractMCMC
 using StableRNGs: StableRNG
-using Statistics: mean, std
-using FlexiChains: FlexiChain, Parameter
+using Statistics: mean
+using FlexiChains
 using CairoMakie
 
 # ## Simulate the data
@@ -62,12 +62,24 @@ observed_days = 1:6:n_times
 Rmask = fill(-1, size(R))
 Rmask[:, observed_days] .= R[:, observed_days]
 
+# ## Bundle the model and data
+#
+# EpidemicTrajectories works in three parts: `model` (the parameters), `X` (the
+# latent trajectory), and `data` (the observations plus the group structure).
+# `epidemic_model` captures the fixed *structure* — the state space, the rates,
+# the tests — and returns `loglik(model, X, data)`, `simulate(rng, model, data)`,
+# and `latent!(rng, model, X, data)`. `build_data` bundles the observations and
+# group membership once.
+
+em = epidemic_model(ss, rates; tests = (rams,))
+data = build_data(em, group; observations = (Rmask,))
+
 # ## Reserve the hidden trajectory as a latent variable
 #
-# The hidden state matrix `X` (animals × time) is a latent variable that the
-# sampler will fill in. We represent it as a matrix-valued distribution so
-# PracticalBayes treats it as one discrete latent block, updated by our own
-# kernel rather than by NUTS. Its density is supplied separately (below), so the
+# The hidden state matrix `X` (animals × time) is a latent variable the sampler
+# fills in. We represent it as a matrix-valued distribution so PracticalBayes
+# treats it as one discrete latent block, updated by our own kernel rather than
+# by NUTS. Its density comes from `em.loglik` in the model body, so the
 # distribution itself contributes nothing.
 
 struct TrajectoryLatent <: Distributions.DiscreteMatrixDistribution
@@ -80,26 +92,15 @@ Distributions.rand(rng::Random.AbstractRNG, d::TrajectoryLatent) = zeros(Int, d.
 
 # ## The iFFBS latent kernel
 #
-# The kernel resamples the whole hidden trajectory once per Gibbs sweep, given
-# the current parameters, by calling `ffbs_sweep!`. It reads the current
-# parameter values from `c.values` and returns the new trajectory.
+# The kernel resamples the whole hidden trajectory once per Gibbs sweep with a
+# single call to `em.latent!`.
 
-struct iFFBS{RB<:RateBundle} <: PracticalBayes.AbstractLatentKernel
-    ss::StateSpace
-    rates::RB
-    group::Vector{Int}
-    tests::Tuple{DiagnosticTest}
-    results::Tuple{Matrix{Int}}
-end
-
-function PracticalBayes.latent_step(rng, k::iFFBS, block_names, c::ModelConditional)
+struct iFFBSKernel <: PracticalBayes.AbstractLatentKernel end
+function PracticalBayes.latent_step(rng, ::iFFBSKernel, block_names, c::ModelConditional)
     pars = (; α = c.values.α, β = c.values.β, m = c.values.m̃ + 1.0, θ = c.values.θ)
     X = copy(c.values.X)
-    d = EpidemicTrajectories.make_data(X, k.group)
-    model = (; state_space = k.ss, rates = k.rates, pars = pars)
-    EpidemicTrajectories.ffbs_sweep!(rng, model, d, k.tests, k.results;
-                                     initial_prob = [1 - c.values.ν, c.values.ν])
-    return (; X = d.states)
+    em.latent!(rng, pars, X, data; initial_prob = [1 - c.values.ν, c.values.ν])
+    return (; X = X)
 end
 
 # The initial infection frequency ``\nu`` and the test sensitivity ``\theta``
@@ -129,13 +130,12 @@ end
 
 # ## The model
 #
-# The parameters get priors; the hidden trajectory gets the latent variable; and
-# the trajectory log-likelihood — the same rate functions the kernel uses — is
-# added to the log density with `@addlogprob!`. We reparameterise the infectious
-# period as ``m = \tilde m + 1`` so the recovery probability ``1/m`` stays below
-# one.
+# The parameters get priors; the hidden trajectory is the latent variable; and
+# the trajectory log-likelihood is added with `@addlogprob! em.loglik(pars, X)`.
+# We reparameterise the infectious period as ``m = \tilde m + 1`` so the recovery
+# probability ``1/m`` stays below one.
 
-@model function cattle_model(Rmask, group, ss, rates, n_ind, n_times)
+@model function cattle_model(em, data, n_ind, n_times)
     α ~ Gamma(1, 1)
     β ~ Gamma(1, 1)
     m̃ ~ Gamma(2, 4)
@@ -144,11 +144,7 @@ end
     θ ~ Beta(1, 1)
 
     X ~ TrajectoryLatent(n_ind, n_times)
-
-    pars = (; α = α, β = β, m = m, θ = θ)
-    data = EpidemicTrajectories.make_data(X, group)
-    model = (; state_space = ss, rates = rates, pars = pars)
-    @addlogprob! EpidemicTrajectories.trajectory_loglik(pars, model, data)
+    @addlogprob! em.loglik((; α = α, β = β, m = m, θ = θ), X, data)
 end
 
 # ## Sample
@@ -157,66 +153,49 @@ end
 # parameters, the conjugate kernels for ``\nu`` and ``\theta``, and the iFFBS
 # kernel for the hidden trajectory.
 
-m = cattle_model(Rmask, group, ss, rates, n_ind, n_times)
+m = cattle_model(em, data, n_ind, n_times)
 
 spl = Gibbs(
     (:α, :β, :m̃) => NUTS(0.8),
     :ν => NuKernel(),
     :θ => ThetaKernel(Rmask),
-    :X => iFFBS(ss, rates, group, (rams,), (Rmask,)),
+    :X => iFFBSKernel(),
 )
 
-# We start the hidden trajectory from a plausible simulation and run the sweep.
+# We start the hidden trajectory from a plausible simulation, then `sample` runs
+# the sweeps and returns a chain; `discard_initial` drops burn-in.
 
 X0, _ = simulate_trajectory(StableRNG(99), ss, rates, true_pars, group,
                             [1 - true_ν, true_ν]; n_times = n_times)
 init = (; X = copy(X0), α = 0.05, β = 0.05, m̃ = 4.0, ν = 0.1, θ = 0.7)
 
-n_sweeps, n_burn, n_adapts = 1500, 500, 400
-rng_fit = StableRNG(7)
-
-draws = (α = Float64[], β = Float64[], m = Float64[], ν = Float64[], θ = Float64[])
-transition, state = AbstractMCMC.step(rng_fit, m, spl; init = init)
-for _ in 1:n_sweeps
-    global transition, state
-    transition, state = AbstractMCMC.step(rng_fit, m, spl, state; n_adapts = n_adapts)
-    push!(draws.α, transition.α)
-    push!(draws.β, transition.β)
-    push!(draws.m, transition.m̃ + 1.0)
-    push!(draws.ν, transition.ν)
-    push!(draws.θ, transition.θ)
-end
+chn = AbstractMCMC.sample(StableRNG(7), m, spl, 1000;
+                          init = init, n_adapts = 400, discard_initial = 500)
 
 # ## Check the recovery
 #
-# We discard burn-in and compare the posterior means to the values we simulated
-# from.
+# We compare the posterior means to the values we simulated from. The infectious
+# period is ``m = \tilde m + 1``.
 
-post = map(v -> v[(n_burn + 1):end], draws)
-for (name, truth) in ((:α, true_pars.α), (:β, true_pars.β), (:m, true_pars.m),
-                      (:ν, true_ν), (:θ, true_θ))
-    p = getfield(post, name)
-    println(rpad(name, 3), " mean ", round(mean(p); digits = 4),
-            "  (truth ", truth, ")")
+posterior_m = vec(chn[:m̃]) .+ 1.0
+recovered = (α = vec(chn[:α]), β = vec(chn[:β]), m = posterior_m,
+             ν = vec(chn[:ν]), θ = vec(chn[:θ]))
+truths = (α = true_pars.α, β = true_pars.β, m = true_pars.m, ν = true_ν, θ = true_θ)
+
+for name in (:α, :β, :m, :ν, :θ)
+    println(rpad(name, 3), " mean ", round(mean(getfield(recovered, name)); digits = 4),
+            "  (truth ", getfield(truths, name), ")")
 end
-
-# Collect the draws into a chain so we can use FlexiChains' plotting recipes.
-
-chn = FlexiChain{Symbol}(length(post.α), 1, Dict(
-    Parameter(:α) => post.α, Parameter(:β) => post.β, Parameter(:m) => post.m,
-    Parameter(:ν) => post.ν, Parameter(:θ) => post.θ,
-))
 
 # ## Plot
 #
 # We plot each parameter's posterior density with a line marking the value we
 # simulated from.
 
-truths = (α = true_pars.α, β = true_pars.β, m = true_pars.m, ν = true_ν, θ = true_θ)
 fig = Figure(size = (900, 500))
 for (i, name) in enumerate((:α, :β, :m, :ν, :θ))
     ax = Axis(fig[fldmod1(i, 3)...]; title = string(name), ylabel = "density")
-    density!(ax, getfield(post, name))
+    density!(ax, getfield(recovered, name))
     vlines!(ax, [getfield(truths, name)]; color = :firebrick, linewidth = 2)
 end
 fig

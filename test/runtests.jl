@@ -5,9 +5,7 @@ using StableRNGs: StableRNG
 using Statistics: mean
 
 @testset "EpidemicTrajectories.jl" begin
-    include("compartments.jl")
-    include("functional_style.jl")
-    include("transition_matrix_style.jl")
-    include("interface.jl")
-    include("consistency.jl")
+    include("spec.jl")
+    include("aggregates.jl")
+    include("iffbs.jl")
 end

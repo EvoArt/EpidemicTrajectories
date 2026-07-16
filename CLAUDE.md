@@ -2,53 +2,93 @@
 
 Guidance for Claude Code (or any agent) working in EpidemicTrajectories.jl.
 
+## Why this package exists (the founding motivation — don't lose this)
+
+The reason this package was started: to **sample latent states within a
+PracticalBayes model without that sampler running on every NUTS/HMC gradient
+call.** In a plain PPL, a data-augmentation step written inside the model body
+would re-run on every gradient evaluation — expensive, and for a stochastic
+sampler it also makes the gradient itself stochastic, which can invalidate the
+inference. PracticalBayes solves this structurally: the latent block is updated
+once per Gibbs sweep by an `AbstractLatentKernel`, lexically outside every
+gradient call, and is held constant (AD-constant `ValueSlot`) while the
+continuous parameters are differentiated. This package provides the pieces that
+plug into that seam.
+
+**iFFBS is only ONE example of a latent-trajectory sampler.** The package is not
+about iFFBS specifically — it's about generating, from a model spec, a
+latent-state sampler (whatever kind is appropriate) plus a matching likelihood
+and simulator that a PPL can use. iFFBS is the first one implemented because it
+fits the two-state discrete-time cattle model; other latent samplers (particle
+Gibbs / conditional SMC, block/blocked Gibbs, other FFBS variants, MH-within-
+Gibbs move-events, etc.) are equally in scope and should slot into the same
+`latent!`-shaped role. Keep the design general enough that the latent sampler is
+pluggable, not hard-coded to FFBS.
+
 ## What this package is
 
 EpidemicTrajectories.jl builds **discrete-time individual-level epidemic models**
-as three reusable, **PPL-agnostic** pure functions:
+as three reusable, **PPL-agnostic** pure functions, generated from a model spec:
 
-1. a **simulator** (`simulate_trajectory`, `simulate_chain_binomial`),
-2. an **autodiff-friendly likelihood** (`trajectory_loglik`,
-   `chain_binomial_loglik`) — usable as an HMC target via `@addlogprob!`, and
-3. a **latent-state sampler** (`ffbs_sweep!` / `ffbs_individual!`) — individual
-   forward-filtering / backward-sampling (iFFBS).
+1. a **simulator**,
+2. an **autodiff-friendly likelihood** — usable as an HMC target via
+   `@addlogprob!`, and
+3. a **latent-state sampler** — currently iFFBS, but this is one instance of a
+   pluggable role, not the whole story (see "Why this package exists" above).
 
 **It has no dependency on any probabilistic-programming framework.** That is
 deliberate: the likelihood drops into a PracticalBayes (or Turing) `@addlogprob!`,
-and the iFFBS sampler is exactly what a PracticalBayes `AbstractLatentKernel`'s
-`latent_step` calls once per Gibbs sweep. The wiring into PracticalBayes is done
-by the user (see `examples/cattle_ecoli_iffbs.jl`) and, later, automated by the
-companion package **PracticalEpiBayes.jl** (currently an empty placeholder in
-`~/.julia/dev/PracticalEpiBayes`).
+and the latent sampler is exactly what a PracticalBayes `AbstractLatentKernel`'s
+`latent_step` calls once per Gibbs sweep — outside every gradient call.
 
-## Two idioms, one shared core
+## The central design rule (do not violate this)
 
-Both compile down to the same per-step transition probabilities, so the FFBS
-machinery and the likelihood are shared:
+**The package NEVER assumes ahead of time what arrays (if any) the user wants
+tracked during the latent update, or how they should be updated.** This is the
+rule the whole design turns on.
 
-- **Functional (iFFBS-paper) style** — you supply rate functions following
-  `f(pars, model, data, i, t)`. The extension seam is
-  `transition_matrix_at(rb::RateBundle, pars, model, data, i, t) -> Matrix`. This
-  is STRICTLY MORE GENERAL than the transition-matrix style: it can express
-  per-individual covariates, individual-specific observation, network/spatial
-  force of infection, and semi-Markov/history-dependent dynamics. `TwoStateSI` is
-  the canonical concrete bundle (the two-state S/I model).
+Instead: the user declares whatever arrays they want in a generic `aggregates`
+container, and declares how each is updated via a **reversible** update — either
+with the `@aggregate` / `@derived_summary` macros (which generate the forward and
+reverse update from one expression), or by supplying a generic update function
+**together with its reverse**. The package only ever calls those user functions;
+it has no idea whether an array holds infected counts, alive counts, or something
+else entirely.
 
-- **Transition-matrix (gemlib-esque) style** — you list `(from, to)` transitions
-  with a rate each. Two levels:
-  - `SimpleEpiTransitionMatrix` — rates are pure `f(pars, counts, t)` (population
-    counts only). Chain-binomial likelihood (`chain_binomial_loglik`). The
-    exchangeable, count-sufficient case.
-  - `EpiTransitionMatrix` — rates are the full `f(pars, model, data, i, t)`. This
-    IS a `RateBundle` (implements `transition_matrix_at`), so it drives the same
-    functional machinery (iFFBS, `trajectory_loglik`) — as general as a
-    hand-written functional bundle.
-  - Both buildable via the `@transitions` macro:
-    `@transitions [:individual] StateSpace begin; S -> I = rate; ...; end`.
+Reversibility is what makes iFFBS both correct and cheap: to resample individual
+`i`, the sampler **reverses** `i`'s own contribution out of the aggregates, runs
+the forward filter / backward sample (so `i` sees leave-one-out statistics), then
+**re-applies** `i`'s new contribution. The aggregates stay exactly consistent with
+`X` throughout — verified: the incrementally-maintained aggregate equals a
+from-scratch recompute exactly (`walkthrough_cattle_check.jl`).
 
-The two styles converge (give the same posterior) ONLY in the exchangeable,
-count-sufficient case — that convergence is a property of the specific model, NOT
-a reduction of one style to the other.
+## The reference implementation
+
+**`walkthrough_cattle.jl` is the specification.** It is split into "package code"
+and "user code", is runnable, and reproduces the E. coli cattle model. The package
+refactor is based on it, and an important end goal is that something very close to
+its *user code* section runs against the real package unchanged.
+
+`walkthrough_cattle_check.jl` is the correctness check: it starts iFFBS from a
+deliberately wrong all-susceptible `X` and confirms the sampler rebuilds the
+epidemic (prevalence 0.0 → ~0.17 against a truth of 0.178), that test-positive
+cells are called infected with probability 1 (specificity is 1 in this model), and
+that the incremental aggregate matches a full recompute.
+
+`walkthrough.jl` and `walkthrough_sugar.jl` are earlier, non-runnable sketches.
+
+## Planned: a convenience layer for common cases (NOT YET BUILT)
+
+The generic core above deliberately assumes nothing, which means even the simplest
+model needs the user to declare its aggregates and rates. **In future we will want
+convenience functions/structs for common, simple choices** — e.g. a ready-made
+two-state S/I setup, a standard "infected per group" aggregate, common observation
+models — so the easy case is one line while the general case stays fully open. An
+earlier API (`epidemic_model`/`RateBundle`/`TwoStateSI`/`StateSpace`/
+`SimpleEpiTransitionMatrix`) attempted this but baked in assumptions about the
+tracked arrays, violating the central design rule; it was deleted in favour of the
+walkthrough design. When the convenience layer is rebuilt, it must be a thin,
+optional shell OVER the generic core — never a constraint on it.
 
 ## The reference model
 
@@ -69,61 +109,66 @@ Reference material (read-only, on this dev machine, NOT part of the repo):
   full badger SEID framework; the source of the `f(pars,model,data,i,t)` rate
   protocol and (later) the residuals/diagnostics layer to replicate.
 
-## The `model` / `data` convention
+## The `model` / `X` / `data` convention
 
-Kept lightweight so it works with plain NamedTuples/closures (no framework types):
-- `model` — any object with `.state_space::StateSpace` and `.rates::RateBundle`
-  (and `.pars` for simulation/FFBS, which need concrete parameter values).
-- `data` — any object exposing `.states::Matrix{Int}` (individual × time, user
-  state codes), `.group::Vector{Int}`, and `.members(data, g)`. Build the default
-  with `make_data(states, group)`; extend with `merge(make_data(...), (; ...))`.
+Three distinct things — keep them straight:
+- `model` — the model **parameters** (a NamedTuple such as `(; α, β, m, ν, θʳ, θᶠ)`).
+- `X` — the **latent state trajectory**, a `Matrix{Int}` indexed `X[t, i]`
+  (time × individual), holding 1-based state indices into `state_space`.
+- `data` — everything else: the observations the PPL is conditioned on, the fixed
+  structure (group membership, sampling periods, transition spec), the user's
+  `derived_summaries`, and the user's `aggregates` container.
 
-## The KEY milestone (done)
-
-`examples/cattle_ecoli_iffbs.jl`: simulate cattle capture-recapture data from
-known (α, β, m, ν, θ) and recover them with `Gibbs(NUTS for α/β/m̃, conjugate
-Beta kernels for ν/θ, iFFBS kernel for the latent X)` in PracticalBayes. BOTH
-styles (functional `TwoStateSI` and transition-matrix `@transitions`) recover all
-five parameters within ~1 posterior SD, identically (same core). The example env
-develops EpidemicTrajectories + PracticalBayes; run with
-`julia --project=examples examples/cattle_ecoli_iffbs.jl`.
+Rate functions take `(model, data, i, t)`; derived summaries take
+`(model, data, X, s, i, t; reverse=false)`.
 
 ## Non-obvious facts
 
 - **The whole latent trajectory `X` is stored as ONE whole-matrix latent** in a
   PracticalBayes `@model` (`X ~ SomeDiscreteMatrixDistribution`, routed to a
   `ValueSlot`, resampled by the iFFBS `AbstractLatentKernel`, read AD-constant in
-  the `@addlogprob! trajectory_loglik(...)` term). This needed a one-line
-  PracticalBayes core fix (skip `linked_vec_length` for latent-role sites — see
-  PracticalBayes branch `epi-2d-latent-support`); it is NOT the indexed-`X[i,t]~`
-  family approach.
-- **`TwoStateSI` clamps its transition probabilities to `(1e-12, 1-1e-12)`** — a
-  sampler exploring parameter space can momentarily propose values (huge FOI, or
-  `1/m > 1` when `m < 1`) that would send `log(P[a,b])` in the likelihood to
-  `log(0)`/`log(<0)` and crash NUTS with a `DomainError`. Clamping regularizes
-  only the tails; true params sit well inside the band.
+  the `@addlogprob!` term). This needed a one-line PracticalBayes core fix (skip
+  `linked_vec_length` for latent-role sites, now on PracticalBayes master); it is
+  NOT the indexed-`X[i,t]~` family approach.
+- **Transition probabilities are clamped to `(1e-12, 1-1e-12)`** — a sampler
+  exploring parameter space can momentarily propose values (huge FOI, or
+  `1/m > 1` when `m < 1`) that would send `log(P[a,b])` to `log(0)`/`log(<0)` and
+  crash NUTS with a `DomainError`. Clamping regularizes only the tails; true
+  params sit well inside the band. Hence the `m = m̃ + 1` reparameterization.
 - **Recovery quality depends on the regime.** With near-saturation (>50%
-  prevalence) β and θ are poorly identified (θ recovers low because the poorly-
-  mixing α/β/m produce a wrong latent X, which deflates θ's conjugate update).
-  The example uses a lower-transmission regime (~18% prevalence) where all five
-  parameters are cleanly identified. The FFBS itself is correct in isolation
-  (verified: with TRUE params it recovers states at 91% MAP agreement, test-
-  positive cells → P(I)=1.0 under specificity-1).
+  prevalence) β and the test sensitivities are poorly identified (a poorly-mixing
+  α/β/m produces a wrong latent X, which deflates the conjugate updates). The
+  cattle walkthrough uses a lower-transmission regime (~18% prevalence) where all
+  six parameters are cleanly identified.
 - **`@transitions` arrow parsing:** `S -> I = rate` parses as `Expr(:->, :S,
   block)` where the block holds `Expr(:(=), :I, rate)` — i.e. Julia reads it as
   `S -> (I = rate)`. The macro extracts source/dest/rate accordingly.
-- **State encoding:** `StateSpace.codes` is the user's integer codes in dense
-  order; `state_index(ss, code)` maps a code to its 1-based dense index. The badger
-  SEID uses sparse codes (S=0, E=3, I=1, D=9); the two-state SI uses `{0, 1}`.
+- **Aggregates must be consistent with `X` before the first loglik call.** The
+  invariant is: aggregates always agree with the current `X`. It is established
+  once by `reset_aggregates!` + `apply_derived_summaries!` on the initial `X`, and
+  preserved thereafter by iFFBS's reverse→refilter→reapply. `loglik` and the rate
+  functions READ the aggregates and never rebuild them.
+
+## Known gaps in the current walkthrough design
+
+- `@survival` is parsed but is currently a stub returning `nothing`.
+- `@transitions` supports only `:individual` style.
+- No convenience layer yet for common/simple choices (see above) — every model
+  currently declares its own aggregates and rates.
 
 ## Roadmap (per user direction)
 
-- Now: two-state S/I model, rate components shaped as `f(model,data,i,t)`. ✓
+- Now: the generic core from `walkthrough_cattle.jl` — user-declared reversible
+  aggregates, `@transitions`/`@aggregate` macros, iFFBS. ✓
+- Later: convenience functions/structs for common, simple choices (thin shell over
+  the generic core, never a constraint on it).
 - Later: SEID, or let the user declare which of S/E/I/D/R exist in their system.
+- Later: other latent samplers (particle Gibbs/CSMC, blocked Gibbs, MH move-events)
+  behind the same `latent!`-shaped role.
 - Later: residuals / post-hoc diagnostics (PIT, Cox-Snell, exposure/Sellke,
   infection-link, R_i) reusing the same rate functions — the badger
-  `residuals.jl` layer, computed post-hoc from `(pars, X, data)` draws.
-- Later: continuous-time / spatial (gemlib HPAI analogue), ODE-fit extension.
+  `residuals.jl` layer, computed post-hoc from `(model, X, data)` draws.
+- Later: continuous-time / spatial, ODE-fit extension.
 
 ## Conventions
 

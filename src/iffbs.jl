@@ -1,188 +1,153 @@
 # Individual forward-filtering, backward-sampling (iFFBS).
 #
-# Resamples ONE individual's entire hidden-state trajectory `X[i, :]` from its
-# exact full conditional given the current parameters, the observed test data,
-# and every OTHER individual's fixed trajectory. Sweeping this over all
-# individuals is a valid Gibbs update of the whole latent state `X`.
+# Resamples one individual's whole state trajectory from its exact conditional
+# given the parameters, the observations, and every other individual's trajectory.
+# Sweeping over all individuals is a valid Gibbs update of the entire latent `X`.
 #
-# This is a direct generalization of the iFFBS-paper FFBS (see the package's
-# reference `original_cattle_ecoli_iFFBS` example) to the `RateBundle` protocol,
-# so it works for any two-state (and, later, multi-state) model whose per-step
-# dynamics are given by `transition_matrix_at`. The three ingredients of the
-# forward filter for the focal individual `i` at each time `t`:
-#
-#   1. PREDICTION: push last step's filtered distribution through individual i's
-#      own transition matrix `P_i(t-1)` (which depends on the OTHER penmates'
-#      states at t-1, held fixed).
-#   2. OBSERVATION likelihood ("corrector"): multiply by the per-state
-#      likelihood of i's observed test results at t (imperfect diagnostics).
-#   3. COUPLING likelihood: the crucial iFFBS term. Because i's state at t feeds
-#      into its PENMATES' force of infection for their t -> t+1 transitions,
-#      the penmates' (fixed, observed-as-latent) transitions carry information
-#      about i's state at t. For each candidate state of i at t, we compute the
-#      probability the penmates would make exactly the transitions they do, and
-#      weight by it. Omitting this term samples from the wrong conditional (it
-#      corresponds to the "no coupling" approximation the paper also studies).
-#
-# Backward sampling then draws `X[i, T]` from the final filtered distribution and
-# walks backward, at each step drawing `X[i, t]` from the filtered distribution
-# reweighted by the sampled `X[i, t+1]` and i's own transition matrix.
+# The aggregates are kept consistent with `X` throughout by reversing the focal
+# individual's contribution before refiltering and re-applying it afterwards — see
+# `aggregates.jl` for why that reversibility is the design's foundation. It is also
+# what makes the statistics the focal individual sees leave-one-out (excluding
+# itself) without any special-casing.
 
 """
-    ffbs_individual!(rng, model, data, i, tests, results;
-                     initial_prob, coupling=true)
+    observation_process(model, data, X, i, t) -> Vector
 
-Resample individual `i`'s full hidden-state trajectory in place into
-`data.states[i, :]`, from its exact full conditional given the current
-parameters (`model.pars`), the observed `results`, and every other individual's
-current trajectory. Implements forward-filtering/backward-sampling with an
-imperfect-test observation likelihood and (optionally) the penmate COUPLING term.
+The per-state likelihood of individual `i`'s observations at time `t` — the
+"corrector" the filter multiplies into its predicted state probabilities.
 
-Arguments:
-- `model`: object with `.state_space`, `.rates`, and `.pars` (current parameter
-  values — FFBS runs in plain `Float64`, never under AD).
-- `data`: exposes `.states`, `.group`, `.members` (see [`make_data`](@ref)).
-- `i`: focal individual index.
-- `tests`, `results`: tuple of [`DiagnosticTest`](@ref)s and their result
-  matrices (see [`observation_loglik`](@ref) for the format).
-- `initial_prob`: length-`nstates` probability vector over dense states at `t=1`.
-- `coupling`: include the penmate coupling likelihood (default `true`). Set
-  `false` to reproduce the paper's no-coupling variant / for models where an
-  individual's state does not enter others' transition rates.
-
-Returns the newly sampled dense-state vector for individual `i`.
+The default reads `data.test_mats` under the convention that a negative entry
+means "not observed" (contributing no information) and interprets the model's
+`θʳ`/`θᶠ` as test sensitivities against a perfectly specific test. Replace it for
+a different observation model.
 """
-function ffbs_individual!(rng::AbstractRNG, model, data, i, tests, results;
-                          initial_prob, coupling=true)
-    ss = model.state_space::StateSpace
-    pars = model.pars
-    N = nstates(ss)
-    X = data.states
-    n_t = size(X, 2)
+function observation_process(model, data::EpidemicData, X, i, t)
+    w = ones(Float64, data.n_states)
+    y_r = data.test_mats[1][t, i]
+    y_f = data.test_mats[2][t, i]
 
-    predicted = Matrix{Float64}(undef, N, n_t)   # p(state at t | data up to t-1)
-    filtered = Matrix{Float64}(undef, N, n_t)    # p(state at t | data up to t)
+    if y_r >= 0
+        θ = model.θʳ
+        w[1] *= y_r == 1 ? 0.0 : 1.0
+        w[2] *= y_r == 1 ? θ : (1 - θ)
+    end
 
-    # --- t = 1 ---
-    @views predicted[:, 1] .= initial_prob
-    obs1 = _obs_lik_vec(tests, pars, ss, results, i, 1)
-    coup1 = coupling ? _coupling_lik_vec(model, data, i, 1, ss) : ones(N)
-    w = @views predicted[:, 1] .* obs1 .* coup1
-    @views filtered[:, 1] .= w ./ sum(w)
+    if y_f >= 0
+        θ = model.θᶠ
+        w[1] *= y_f == 1 ? 0.0 : 1.0
+        w[2] *= y_f == 1 ? θ : (1 - θ)
+    end
 
-    # --- forward filter, t = 2 .. n_t ---
-    for t in 2:n_t
-        # individual i's own transition matrix for (t-1 -> t) depends on penmates
-        # at t-1 (i excluded — leave-one-out FOI), held fixed during this sweep.
-        Pprev = transition_matrix_at(model.rates, pars, model, data, i, t - 1)
-        for b in 1:N
-            s = 0.0
-            @inbounds for a in 1:N
-                s += Pprev[a, b] * filtered[a, t - 1]
-            end
-            predicted[b, t] = s
+    w
+end
+
+initialise_forward_filter(model, data::EpidemicData, X, i, t) = data.starting_state(model, data, X, i, t)
+
+"""
+    forward_filter(xᵢ, start_sampling, end_sampling, model, data, X, i)
+
+The forward pass for individual `i`: at each time, push the previous filtered
+distribution through `i`'s transition matrix, then multiply in the observation
+likelihood and the coupling term. Returns the filtered distributions and the
+cached transition matrices (reused by the backward pass).
+"""
+function forward_filter(xᵢ, start_sampling, end_sampling, model, data::EpidemicData, X, i)
+    probs = zeros(Float64, length(xᵢ), data.n_states)
+    trans_cache = Vector{Matrix{Float64}}(undef, length(xᵢ))
+
+    t0 = start_sampling
+    base = initialise_forward_filter(model, data, X, i, t0)
+    obs = observation_process(model, data, X, i, t0)
+    affected = data.affected_individuals === nothing ? nothing : data.affected_individuals[t0, i]
+    rest = data.rest_contribution(model, data, X, i, t0, data.n_states, affected)
+    init = base .* obs .* rest
+    probs[1, :] .= init ./ sum(init)
+    trans_cache[1] = zeros(Float64, data.n_states, data.n_states)
+
+    for j in 2:length(xᵢ)
+        t = start_sampling + j - 1
+        tp = t - 1
+        trans = transition_matrix_at(data.trans_mat, model, data, X, i, tp)
+        trans_cache[j] = trans
+        pred = trans' * view(probs, j - 1, :)
+        obs_w = observation_process(model, data, X, i, t)
+        affected = data.affected_individuals === nothing ? nothing : data.affected_individuals[t, i]
+        rest_w = data.rest_contribution(model, data, X, i, t, data.n_states, affected)
+        unnorm = pred .* obs_w .* rest_w
+        z = sum(unnorm)
+        probs[j, :] .= z > 0 ? unnorm ./ z : fill(1.0 / data.n_states, data.n_states)
+    end
+
+    probs, trans_cache
+end
+
+"""
+    backward_sample!(probs, trans_cache, xᵢ, start_sampling, end_sampling, model, data, X, i, rng)
+
+The backward pass: draw the final state from its filtered distribution, then walk
+backwards drawing each state from its filtered distribution reweighted by the
+already-sampled next state. Writes into `xᵢ` (a view into `X`).
+"""
+function backward_sample!(probs, trans_cache, xᵢ, start_sampling, end_sampling, model, data::EpidemicData, X, i, rng)
+    n_t = length(xᵢ)
+    xᵢ[n_t] = _sample_categorical(rng, view(probs, n_t, :))
+
+    for j in (n_t - 1):-1:1
+        trans = trans_cache[j + 1]
+        bnext = xᵢ[j + 1]
+        cond = view(probs, j, :) .* view(trans, :, bnext)
+        z = sum(cond)
+        w = z > 0 ? cond ./ z : fill(1.0 / data.n_states, data.n_states)
+        xᵢ[j] = _sample_categorical(rng, w)
+    end
+    nothing
+end
+
+"""
+    iffbs_individual!(model, data, X, i, rng)
+
+Resample individual `i`'s whole trajectory in place.
+
+Reverses `i`'s contribution out of the aggregates, runs the forward filter and
+backward sample, then re-applies `i`'s new contribution — leaving the aggregates
+exactly consistent with the updated `X`, and giving `i` leave-one-out statistics
+while it is being resampled.
+"""
+function iffbs_individual!(model, data::EpidemicData, X, i, rng)
+    start_sampling, end_sampling = data.sampling_period[i]
+    xᵢ = @view X[start_sampling:end_sampling, i]
+
+    for t in start_sampling:end_sampling
+        for ds in data.derived_summaries
+            ds(model, data, X, X[t, i], i, t; reverse=true)
         end
-        obs = _obs_lik_vec(tests, pars, ss, results, i, t)
-        coup = coupling ? _coupling_lik_vec(model, data, i, t, ss) : ones(N)
-        wt = @views predicted[:, t] .* obs .* coup
-        z = sum(wt)
-        @views filtered[:, t] .= (z > 0 ? wt ./ z : fill(1 / N, N))
     end
 
-    # --- backward sample ---
-    sampled = Vector{Int}(undef, n_t)      # dense indices
-    sampled[n_t] = _sample_categorical(rng, @view filtered[:, n_t])
-    for t in (n_t - 1):-1:1
-        # p(X_t = a | X_{t+1} = sampled[t+1], data up to t)
-        #   ∝ filtered[a, t] * P_i(a -> sampled[t+1]; at time t)
-        Pt = transition_matrix_at(model.rates, pars, model, data, i, t)
-        bnext = sampled[t + 1]
-        w = Vector{Float64}(undef, N)
-        @inbounds for a in 1:N
-            w[a] = filtered[a, t] * Pt[a, bnext]
+    probs, trans_cache = forward_filter(xᵢ, start_sampling, end_sampling, model, data, X, i)
+    backward_sample!(probs, trans_cache, xᵢ, start_sampling, end_sampling, model, data, X, i, rng)
+
+    for t in start_sampling:end_sampling
+        for ds in data.derived_summaries
+            ds(model, data, X, X[t, i], i, t)
         end
-        sampled[t] = _sample_categorical(rng, w)
     end
 
-    # write the sampled trajectory back (as user state codes)
-    @inbounds for t in 1:n_t
-        X[i, t] = ss.codes[sampled[t]]
-    end
-    return @view X[i, :]
-end
-
-# Observation likelihood vector for individual i at time t (length nstates).
-@inline function _obs_lik_vec(tests, pars, ss::StateSpace, results, i, t)
-    rs = ntuple(k -> results[k][i, t], length(results))
-    return observation_likelihood(tests, pars, ss, rs)
-end
-
-# Coupling likelihood: for each candidate dense state `a` of focal individual i
-# at time t, the probability the OTHER penmates make exactly the (t -> t+1)
-# transitions their fixed trajectories show, GIVEN i is in state `a` at t.
-# Individual i's state enters penmates' transitions only through the count of
-# infected animals in the pen; so we temporarily set i's state and recompute each
-# penmate's realized transition probability.
-#
-# At the final time there is no t -> t+1 transition, so coupling is uninformative
-# (returns all-ones).
-function _coupling_lik_vec(model, data, i, t, ss::StateSpace)
-    N = nstates(ss)
-    X = data.states
-    n_t = size(X, 2)
-    if t == n_t
-        return ones(N)
-    end
-    pars = model.pars
-    g = data.group[i]
-    penmates = data.members(data, g)
-
-    saved = X[i, t]  # restore afterward
-    lik = ones(Float64, N)
-    for a in 1:N
-        X[i, t] = ss.codes[a]  # hypothesize i in dense state a at time t
-        prob = 1.0
-        for j in penmates
-            j == i && continue
-            aj = state_index(ss, X[j, t])
-            bj = state_index(ss, X[j, t + 1])
-            Pj = transition_matrix_at(model.rates, pars, model, data, j, t)
-            @inbounds prob *= Pj[aj, bj]
-        end
-        lik[a] = prob
-    end
-    X[i, t] = saved  # restore i's original state
-    return lik
-end
-
-@inline function _sample_categorical(rng::AbstractRNG, w)
-    z = sum(w)
-    u = rand(rng) * z
-    c = 0.0
-    @inbounds for k in eachindex(w)
-        c += w[k]
-        u ≤ c && return k
-    end
-    return length(w)
+    nothing
 end
 
 """
-    ffbs_sweep!(rng, model, data, tests, results; initial_prob, coupling=true)
+    iffbs!(model, data, X, rng) -> X
 
-One full iFFBS Gibbs sweep of the entire latent state: resample every
-individual's trajectory in turn via [`ffbs_individual!`](@ref), in index order
-(each resample conditions on the just-updated trajectories of earlier
-individuals — a systematic-scan Gibbs sweep). Mutates `data.states` in place and
-returns it.
+One full iFFBS sweep: resample every individual's trajectory in turn, each
+conditioning on the others' current trajectories.
 
-This is the function a PracticalBayes `AbstractLatentKernel`'s `latent_step`
-calls once per outer Gibbs sweep (see the `PracticalEpiBayes` companion package),
-handing back `(; X = copy(data.states))`.
+Assumes the aggregates already agree with `X` on entry (see
+[`apply_derived_summaries!`](@ref)) and preserves that invariant on exit, so a
+sweep never rebuilds them.
 """
-function ffbs_sweep!(rng::AbstractRNG, model, data, tests, results; initial_prob, coupling=true)
-    n_ind = size(data.states, 1)
-    for i in 1:n_ind
-        ffbs_individual!(rng, model, data, i, tests, results; initial_prob=initial_prob, coupling=coupling)
+function iffbs!(model, data::EpidemicData, X, rng)
+    for i in 1:data.n_individuals
+        iffbs_individual!(model, data, X, i, rng)
     end
-    return data.states
+    X
 end

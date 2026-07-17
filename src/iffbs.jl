@@ -19,10 +19,27 @@ The forward pass for individual `i`: at each time, push the previous filtered
 distribution through `i`'s transition matrix, then multiply in the observation
 likelihood and the coupling term. Returns the filtered distributions and the
 cached transition matrices (reused by the backward pass).
+
+The backward pass needs every timepoint's transition matrix still alive when it
+runs, so they can't share one buffer the way a single-matrix-at-a-time loop would
+— but they need not be `length(xᵢ)` SEPARATE allocations either. `trans_cache` is
+one contiguous `N × N × (length(xᵢ)-1)` array, filled a slice at a time via
+[`transition_matrix_at!`](@ref); `rowsum` is pure scratch (nothing outside
+`transition_matrix_at!` reads it) and is genuinely reused across every timepoint.
+Before this, one badger-sized sweep (2384 individuals, ~78-timepoint average
+window) allocated close to 185,000 short-lived `N × N` matrices; profiling showed
+that allocation, not dispatch, as the dominant cost once the earlier type-stability
+fixes had already landed (see the repro log).
 """
 function forward_filter(xᵢ, start_sampling, end_sampling, model, data::EpidemicData, X, i)
-    probs = zeros(Float64, length(xᵢ), data.n_states)
-    trans_cache = Vector{Matrix{Float64}}(undef, length(xᵢ))
+    n_t = length(xᵢ)
+    N = data.n_states
+    probs = zeros(Float64, n_t, N)
+    trans_cache = zeros(Float64, N, N, n_t)
+    # Matches trans_cache's eltype, not _param_eltype(model): forward_filter only
+    # ever runs on the plain-Float64 iFFBS sampler path, never under AD (that is
+    # the whole point of the package — iFFBS runs outside every gradient call).
+    rowsum = zeros(Float64, N)
 
     t0 = start_sampling
     base = initialise_forward_filter(model, data, X, i, t0)
@@ -31,13 +48,14 @@ function forward_filter(xᵢ, start_sampling, end_sampling, model, data::Epidemi
     rest = data.rest_contribution(model, data, X, i, t0, data.n_states, affected)
     init = base .* obs .* rest
     probs[1, :] .= init ./ sum(init)
-    trans_cache[1] = zeros(Float64, data.n_states, data.n_states)
+    # trans_cache[:, :, 1] is left as zeros — never read (backward_sample! walks
+    # from n_t down to 2, reading trans_cache[j] for j >= 2 only).
 
-    for j in 2:length(xᵢ)
+    for j in 2:n_t
         t = start_sampling + j - 1
         tp = t - 1
-        trans = transition_matrix_at(data.trans_mat, model, data, X, i, tp)
-        trans_cache[j] = trans
+        trans = view(trans_cache, :, :, j)
+        transition_matrix_at!(trans, rowsum, data.trans_mat, model, data, X, i, tp)
         pred = trans' * view(probs, j - 1, :)
         obs_w = data.observation_process(model, data, X, i, t)
         affected = data.affected_individuals === nothing ? nothing : data.affected_individuals[t, i]
@@ -62,7 +80,7 @@ function backward_sample!(probs, trans_cache, xᵢ, start_sampling, end_sampling
     xᵢ[n_t] = _sample_categorical(rng, view(probs, n_t, :))
 
     for j in (n_t - 1):-1:1
-        trans = trans_cache[j + 1]
+        trans = view(trans_cache, :, :, j + 1)
         bnext = xᵢ[j + 1]
         cond = view(probs, j, :) .* view(trans, :, bnext)
         z = sum(cond)

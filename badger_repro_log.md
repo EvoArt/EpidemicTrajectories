@@ -891,7 +891,7 @@ down from the earlier ~330-hour estimate. Not yet attempted end-to-end (the
 session), but the two blocking problems — a crash on the first conjugate update,
 and a ~12x-too-slow gradient — are both fixed now.
 
-**Not fixed, lower priority, noted for later:** `derived_summaries::Vector{Function}`
+**Not fixed, lower priority, noted for later (at the time):** `derived_summaries::Vector{Function}`
 (`src/data.jl`) has the identical unparametrized-field shape, but it's read only
 by the iFFBS/simulator/aggregate-update paths (`build.jl`'s `simulate`,
 `iffbs.jl`, `transitions.jl`'s `make_rest_contribution`) — never by
@@ -900,3 +900,158 @@ reference's iFFBS sweep and ours are already in a similar ballpark (5-8s each),
 so this isn't blocking; fixing it would need the same kind of struct
 reparametrization (`EpidemicData{...,DS<:Tuple}`) and is a candidate for a
 follow-up pass if iFFBS timing becomes the bottleneck again.
+
+**This turned out to be wrong** — see the next entry. The "similar ballpark"
+comparison was contaminated by JIT-compilation time on both sides (a single,
+uncontrolled sample per side), and once measured cleanly the iFFBS gap was ~6x,
+not "similar."
+
+### 2026-07-17 — proper apples-to-apples benchmarking: methodology, then the real iFFBS fix
+
+Arthur's next ask, precisely: *"cant we copy the mcmciffbs function/script and make
+a new one that follows all the same steps, except that when it gets to the hmc
+bit, it benchmarks gradient evaluation"* — i.e. stop eyeballing single numbers
+from different runs and build a real, controlled comparison. Then, mid-benchmark:
+*"never run benchmarks concurrently with other code"* (two jobs had been launched
+in parallel to save wall-clock time, which contaminates both timings on a shared
+8-core machine — added to memory as a standing rule) and *"the 1 sweep contains
+compilation time? we need compilation-free benchmarks."*
+
+**What got built**, all still in the repo:
+- `badger_ref/bench_ref.jl` + `badger_ref/bench_mcmc_body.jl` — a byte-for-byte
+  copy of `MCMCiFFBS_`'s setup code (struct construction, survival refresh,
+  group-level FOI precompute) up to its `for iter in 1:N` loop, with the real
+  loop body replaced by a small harness timing (a) one full iFFBS sweep and (b)
+  several `grad_pars` calls through the same cached `prep`/`backend` the real
+  HMC/NUTS step uses. The reference's own `Project.toml`/`Manifest.toml` were
+  stale (referenced packages weren't even in the manifest) — deleted and
+  re-resolved from the actual `using`/`import` statements across the source.
+- `examples/bench_gradient.jl` — the package-side equivalent: gradient timing
+  through `PracticalBayes.LogDensityFunction` (exactly what NUTS calls) AND an
+  iFFBS sweep through `epidemic_latent_sampler` (exactly what `iFFBSKernel`
+  calls), same reporting shape.
+- Both warm up once, untimed, before their timed loop — the first call to any
+  freshly-JIT'd function compiles it, and that cost had been silently dominating
+  single-sample readings on both sides (reference: repeat-1 iFFBS = 4.5-4.6s,
+  repeat-2 = 1.2-1.3s, SAME sweep, only compilation differs).
+- `badger_ref/run_all_benchmarks.sh` runs all variants **strictly sequentially** —
+  no `&`, no background jobs racing each other, each `julia` call blocks until it
+  exits before the next starts.
+
+**Clean, compilation-free, non-concurrent numbers** (both sides, `AutoForwardDiff`):
+
+| | Reference | Package (before this session's iFFBS fix) |
+|---|---|---|
+| iFFBS sweep | min=1.216s mean=1.216s median=1.216s (1 clean sample) | min=7.689s mean=7.714s median=7.714s (2 sweeps) |
+| Gradient (61 params) | min=0.073s mean=0.102s median=0.099s (30 evals) | min=0.135s mean=0.16s median=0.148s (15 evals) |
+
+Also benchmarked `AutoPolyesterForwardDiff` (Arthur: *"try both with
+polyesterforwarddiff aswell as forwarddiff"*): gives the reference a genuine ~3x
+gradient speedup (median 0.099s → 0.032s). On our side it does not work at all —
+crashes inside `Bijectors.VectorBijectors`'s `with_logabsdet_jacobian` when
+PolyesterForwardDiff's threaded chunk-splitting (`StrideArraysCore` arrays) meets
+our link/invlink transform (`ArgumentError: tuple must be non-empty`,
+`StrideArraysCore/ptr_array.jl:998`). Real cross-package incompatibility, not
+attempted to fix this session — flagged for whoever picks up PolyesterForwardDiff
+support on our side later.
+
+**So: gradient parity confirmed (median ~0.13-0.15s vs reference's ~0.10s, both
+close), but iFFBS was genuinely ~6x slower (7.7s vs 1.2s), not "similar ballpark"
+as the previous entry concluded from contaminated data.**
+
+**Chasing the real cause — two real fixes that didn't move the number, a third
+that did.** Arthur: *"please go ahead and investigate the iffbs slowness, based on
+your suspicion first"* — the suspicion being the same unparametrized-abstract-
+field pattern already found for `trans_mat`.
+
+1. **`derived_summaries::Vector{Function}` → `Tuple`.** `AggregateDeclaration`
+   (`src/aggregates.jl`) and `EpidemicData` (`src/data.jl`) both parametrized
+   (`AggregateDeclaration{DS<:Tuple}`, `EpidemicData{...,DS<:Tuple}`); the
+   `@aggregate` macro now emits `($(lams...),)` instead of `Function[lams...]`;
+   `epidemic_data`'s verbose-fallback constructor converts with `Tuple(...)`
+   instead of `Vector{Function}(...)`. **Confirmed real** by profiling before/
+   after: the `dispatch?=Y` flags on `rest_contribution`
+   (`transitions.jl:234/251`) and `iffbs_individual!` (`iffbs.jl:91/100`)
+   completely disappeared — every row in the post-fix profile shows `dispatch?=-`.
+   **But the sweep timing did not move** (still 8.1-8.5s). Dispatch was real but
+   was never the dominant cost — profiling percentages can mislead about which
+   fix will actually matter if something else with a larger absolute cost has no
+   dispatch flag to notice it by.
+2. **`transition_matrix_at!` buffer reuse in `forward_filter`.** The forward
+   filter built a fresh `zeros(N,N)` + `zeros(N)` on every one of ~185,000
+   `(individual, timepoint)` calls per sweep (~30MB of short-lived allocation,
+   `gc?=Y` on `Array` at `boot.jl:477/479`, ~24% of self time). Added
+   `transition_matrix_at!(P, rowsum, ...)` (in-place core; `transition_matrix_at`
+   is now a thin allocating wrapper around it, so every OTHER caller —
+   `simulate`, tests — is unaffected). `forward_filter` now preallocates the
+   whole `trans_cache` as one `N × N × n_t` array up front and reuses one
+   `rowsum` scratch vector across the loop; `backward_sample!` updated to index
+   the 3D array instead of a `Vector{Matrix}`. **Confirmed via 100/100 tests**
+   passing (the buffer-reuse path produces bit-identical results to fresh
+   allocation — same arithmetic, just not re-allocated). **Sweep timing again did
+   not move** (8.1-8.9s). Two real, profiler-motivated, test-verified fixes in a
+   row, zero measurable effect — a strong signal to stop trusting the profiler's
+   percentage table and instrument directly instead.
+3. **Direct instrumentation, not profiling.** Timed `iffbs_individual!`'s four
+   phases separately (reverse aggregates / `forward_filter` / `backward_sample!`
+   / reapply aggregates) for one individual, and extrapolated per-cell cost across
+   every individual's own window — this matched the observed sweep total
+   (6.8s extrapolated vs ~8s observed), confirming nothing was hiding outside
+   what was measured. `forward_filter` alone was 87% of one individual's time
+   (3.575ms of 4.091ms). Both prior fixes touched code INSIDE `forward_filter`'s
+   own loop — so what else was in there?
+   **`make_neighbor_logprob_from_transitions`** (`transitions.jl`), called from
+   `rest_contribution` inside `forward_filter`'s per-timepoint coupling term
+   (`data.rest_contribution(...)`, called twice per timepoint — once for the
+   initial state, once per subsequent step). Its old body called the
+   **allocating** `transition_matrix_at` (not `!`) to read ONE entry
+   (`Pj[from_state, to_state]`) — exactly the "build the whole matrix for one
+   entry" waste `transition_prob` was already built to avoid, in the *likelihood*
+   (`epidemic_loglik`, fixed two sessions ago). Nobody had made the same swap
+   here, one level deeper: `rest_contribution` calls this once per affected
+   individual per candidate state (`n_states × |affected|` times per `(i,t)`) —
+   the real multiplier neither of the previous two fixes touched, because they
+   were both inside `forward_filter`'s OWN transition-matrix build, not this
+   nested call through the coupling term. Even the function's own docstring
+   comment ("saves building that neighbour's whole transition matrix") was
+   sitting right next to the code that still built it whenever a neighbour WAS
+   coupled.
+
+   Fix: `make_neighbor_logprob_from_transitions` now calls `transition_prob`
+   instead of `transition_matrix_at`. One-line change to the hot line; no other
+   file touched.
+
+**Result — the actual iFFBS fix, verified clean (100/100 tests, then a fresh
+non-concurrent benchmark):**
+
+| | Reference | Package: before any iFFBS fix | after `derived_summaries` (no change) | after buffer reuse (no change) | after `neighbor_logprob` fix |
+|---|---|---|---|---|---|
+| iFFBS sweep | 1.2-1.3s | 7.7-8.9s | 8.1-8.5s | 8.1-8.9s | **2.9-3.2s** |
+
+**~2.7x speedup**, closing the gap from ~6-7x to ~2.3-2.5x versus the reference.
+Gradient timing was never touched by any of this and stayed at 0.10-0.15s
+throughout, matching the reference's own 0.10s median.
+
+**Lesson for next time, stated plainly since it cost real wall-clock this
+session:** a profiler's self-time percentage table is not the same claim as "this
+is the binding constraint." Two fixes here were independently real (confirmed by
+before/after profiling and by tests), yet neither changed wall-clock time at all,
+because both were inside the wrong function relative to where the actual
+multiplier lived. What broke the deadlock was per-phase direct timing
+(`@elapsed`/`@allocated` on hand-picked sub-calls) that pointed at
+`forward_filter` as 87% of one individual's cost, followed by reading the
+`rest_contribution`/`neighbor_logprob` call chain by eye rather than trusting the
+next profiler run to point at the right line automatically.
+
+**Remaining gap (2.9-3.2s vs 1.2-1.3s, ~2.3-2.5x) not yet investigated.** Plausible
+next places to look, not yet checked: the reference precomputes per-`(g,t)`
+group-level FOI log-probabilities once per sweep (`update_group_level_logs_from_counts!`,
+`logProbStoSgivenSorE` etc.) and its discrete forward-filter reads those cached
+scalars directly, whereas our `badger_infection` rate function recomputes the FOI
+independently for every individual sharing a group (previously noted as a
+possible optimisation, never implemented — see the earlier "gradient benchmarking
+against reference implementation" entry, point about `groupLevelInfectionForce`
+being called per-individual). That asymmetry applies to `forward_filter`'s
+per-timepoint `transition_matrix_at!` call too, not just the likelihood. Not
+confirmed as the cause of the remaining gap — would need the same
+profile-then-instrument discipline as above before touching it.

@@ -229,7 +229,7 @@ macro aggregate(args...)
     specs = [:(AggregateSpec($(QuoteNode(d[1])), $(esc(d[2])), Tuple($(esc(d[3]))), nothing)) for d in decls]
 
     quote
-        local _summaries = Function[$(map(esc, lams)...)]
+        local _summaries = ($(map(esc, lams)...),)
         local _specs = AggregateSpec[$(specs...)]
         AggregateDeclaration(_specs, _summaries)
     end
@@ -240,10 +240,17 @@ end
 
 What [`@aggregate`](@ref) returns: the arrays to allocate and the reversible
 updates that maintain them. Pass it to [`epidemic_data`](@ref) as `aggregates`.
+
+`summaries` is a `Tuple`, not a `Vector{Function}`, for the same reason
+[`TransitionSpec`](@ref)'s `rate_fns` is: each summary is a distinct closure with
+its own concrete type, and `EpidemicData` propagates that type all the way through
+(see its `DS` type parameter) so `for ds in data.derived_summaries` in the hot
+iFFBS/simulate/coupling loops specialises on one concrete function at a time
+instead of dispatching through `Any` on every call.
 """
-struct AggregateDeclaration
+struct AggregateDeclaration{DS<:Tuple}
     specs::Vector{AggregateSpec}
-    summaries::Vector{Function}
+    summaries::DS
 end
 
 """

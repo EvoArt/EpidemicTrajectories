@@ -15,12 +15,36 @@ can momentarily propose values that would otherwise send `log(P[a,b])` in the
 likelihood to `log(0)`, crashing the chain. This regularizes only the tails.
 
 The element type follows the parameters, so this differentiates cleanly under AD.
+
+Allocates a fresh `N × N` matrix (and an `N`-length scratch vector); a caller that
+needs many of these in a tight loop — the iFFBS forward filter is the package's own
+example — should use [`transition_matrix_at!`](@ref) instead to reuse buffers
+across calls.
 """
 function transition_matrix_at(trans_mat::TransitionSpec, model, data::EpidemicData, X, i, t)
     N = data.n_states
     T = _param_eltype(model)
     P = zeros(T, N, N)
     rowsum = zeros(T, N)
+    transition_matrix_at!(P, rowsum, trans_mat, model, data, X, i, t)
+end
+
+"""
+    transition_matrix_at!(P, rowsum, trans_mat, model, data, X, i, t) -> P
+
+In-place [`transition_matrix_at`](@ref): fills the caller-provided `N × N` matrix
+`P` and `N`-length scratch vector `rowsum` (both overwritten completely, so neither
+needs zeroing first) instead of allocating new ones. `rowsum` is pure scratch —
+nothing outside this call reads it — so one buffer may be reused across every
+`(i, t)` in a sweep; `P` is the whole return value and must NOT be reused before
+the caller is done with it (the iFFBS forward filter, which needs every
+timepoint's matrix alive for the backward pass, allocates one `P` per timepoint
+but shares one `rowsum` across all of them — see `forward_filter`).
+"""
+function transition_matrix_at!(P, rowsum, trans_mat::TransitionSpec, model, data::EpidemicData, X, i, t)
+    N = data.n_states
+    fill!(P, zero(eltype(P)))
+    fill!(rowsum, zero(eltype(rowsum)))
 
     # `rate_fns` is a Tuple of DIFFERENT concrete function types, so iterating it
     # with a plain loop would infer the element as a union/Any and dispatch on
@@ -139,13 +163,24 @@ no_rest_contribution(model, data, X, i, t, n_states) = ones(n_states)
 Build the "how likely was this neighbour's realized move" term used by the
 coupling: for individual `j` at time `t`, the log-probability of the transition
 `j` actually makes under the current transition matrix.
+
+Uses [`transition_prob`](@ref), not [`transition_matrix_at`](@ref): only one
+entry — the move `j` actually made — is ever read here, and this is called once
+per affected individual per candidate state inside [`make_rest_contribution`](@ref)
+(`n_states × |affected|` times per `(i, t)` in the iFFBS forward filter). Building
+the whole matrix just to read one entry was, before this, the dominant cost of a
+badger-model iFFBS sweep — confirmed by direct per-phase timing, not just
+profiler self-time percentages (see the repro log): the earlier fixes to
+`forward_filter`'s OWN matrix build (buffer reuse) and to `derived_summaries`'
+type stability were both real but left this call, one level further into the
+coupling term, still allocating a fresh matrix on every one of the
+`n_states × |affected|` calls this makes per timepoint.
 """
 function make_neighbor_logprob_from_transitions(trans_mat::TransitionSpec; eps_prob=1e-12)
     return function (model, data::EpidemicData, X, j, t, updated_id)
-        Pj = transition_matrix_at(trans_mat, model, data, X, j, t)
         from_state = X[t, j]
         to_state = X[t + 1, j]
-        log(max(Pj[from_state, to_state], eps_prob))
+        log(max(transition_prob(trans_mat, model, data, X, j, t, from_state, to_state), eps_prob))
     end
 end
 

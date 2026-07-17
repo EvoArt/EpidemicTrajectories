@@ -400,3 +400,50 @@ Next: verify correctness on a subsample (a few groups), which is the honest thin
 to do before optimising, and report timings rather than sink hours into a run
 that cannot finish. The memoisation idea in "Future performance work" above is
 now the obvious next step, not a someday-maybe.
+
+### 2026-07-17 — the badger iFFBS is correct (after two self-inflicted false alarms)
+
+`examples/badger_check.jl`: simulate a 4-state badger-structured epidemic from
+known parameters, then start the sampler from an all-susceptible `X` and see if it
+rebuilds the truth.
+
+| | truth | recovered |
+|---|---|---|
+| S | 0.053 | 0.041 |
+| E | 0.046 | 0.046 |
+| I | 0.901 | 0.914 |
+| D | 0.0 | 0.0 |
+
+**97.5% state agreement**, `P(E or I) at test-positive cells = 1.0`, and the
+incremental aggregate still equals a from-scratch recompute — now on a four-state
+model with mortality and two coupled aggregates, not just the cattle model's one.
+
+It failed twice first, and **both were my test, not the package**:
+
+1. *"97% dead when the truth is 72%"*. My "survival ≈ 1" parameters were nothing
+   of the sort: with `b2 = 1.0` the Siler senescence term `exp(b2 * age)` explodes
+   and survival is 0.047 by age 20. My badgers aged 10→40, so they nearly all
+   died. Fixed with `b2 = 0.01`, `a2 = 1e-12` and younger animals.
+2. *"P(E or I) at test-positive cells = 0.024"* — the sampler putting badgers in a
+   state a near-perfect positive test rules out. The cause: I set `etas = 1.0`
+   ("capture is certain") while capturing only every 3rd step. If capture is
+   certain then **not being seen logically implies dead**, so the observation
+   process — correctly — forced every unobserved step to D. Incoherent test
+   parameters, not a bug. Fixed with `etas = 0.6`.
+
+Isolating it took a single-badger, no-coupling case, which showed obs weights
+`[1,1,1,0]` when captured, survival 1.0, a correct S→E→I transition matrix with D
+absorbing, and an all-infectious sampled trajectory with no deaths — i.e. the
+machinery was right all along and the harness was lying.
+
+Worth keeping in mind for the real fit: `eta` and capture frequency are coupled
+assumptions. A high `eta` with sparse capture is not a neutral choice — it is a
+strong statement that unobserved badgers are dead.
+
+**Coupling scope** (Arthur asked): our coupling is group-scoped —
+`affected_individuals[t, i]` holds only groupmates at time `t`, so an individual's
+state only ever affects same-group, same-time badgers. What we do *not* have is
+the reference's `whichRequireUpdate`, which further restricts recomputation to
+individuals whose contribution actually changed. We recompute for every groupmate,
+for every candidate state, at every `(i, t)` — which is a large part of the
+4.7 min/sweep.

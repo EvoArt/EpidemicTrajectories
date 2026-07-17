@@ -156,6 +156,13 @@ Build the [`EpidemicData`](@ref) for a model.
   so it may vary over time. Defaults to groupmates under a fixed `group` (see
   [`build_affected_individuals_from_groups`](@ref)). Pass your own for a network,
   spatial, or time-varying-membership model.
+- `coupled_transitions`: WHICH of a neighbour's transitions this individual can
+  influence, e.g. `[(:S, :E)]` when the only effect one individual has on another
+  is contributing to its force of infection. Purely an optimisation, and often a
+  large one: a neighbour whose realised move is not in this list has the same
+  probability whatever the focal does, so it can be skipped exactly. Defaults to
+  `nothing`, meaning "assume every transition is coupled" — correct, but it makes
+  the sampler do the full work. See [`coupled_transition_mask`](@ref).
 - `group`: group index per individual, used only by the default
   `affected_individuals` and by whatever your own functions read off it. Ignore it
   entirely if your model has no fixed groups.
@@ -180,6 +187,7 @@ function epidemic_data(; n_individuals, n_timepoints, trans_mat,
                          observation_process=no_observations,
                          sampling_period=nothing,
                          affected_individuals=nothing,
+                         coupled_transitions=nothing,
                          state_space=trans_mat.states, derived_summaries=nothing,
                          extras...)
     # An @aggregate declaration carries both the storage to allocate and the
@@ -219,9 +227,16 @@ function epidemic_data(; n_individuals, n_timepoints, trans_mat,
                                 "matrix of index vectors, got size $(size(affected_individuals))"))
     end
 
+    # Which of a neighbour's moves this individual can influence. Declaring it is
+    # a pure optimisation — see `coupled_transition_mask`.
+    coupled_mask = coupled_transitions === nothing ? nothing :
+        coupled_transition_mask(state_space, coupled_transitions)
+
     affected_ids = (data, t, i) -> affected_individuals[t, i]
     neighbor_logprob = make_neighbor_logprob_from_transitions(trans_mat)
-    rest_contribution = make_rest_contribution(affected_ids=affected_ids, neighbor_logprob=neighbor_logprob)
+    rest_contribution = make_rest_contribution(affected_ids=affected_ids,
+                                               neighbor_logprob=neighbor_logprob,
+                                               coupled_mask=coupled_mask)
 
     EpidemicData(
         n_individuals,

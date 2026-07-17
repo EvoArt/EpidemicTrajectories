@@ -229,3 +229,46 @@ end
     # a plain Dict needs them
     @test_throws ErrorException epidemic_data(; common..., aggregates=Dict{Symbol,Any}())
 end
+
+@testset "coupled_transitions: the skip is exact, not an approximation" begin
+    # Declaring which transitions the focal can influence lets the sampler skip
+    # neighbours whose realised move it cannot affect. That must not change the
+    # answer: those neighbours contribute an identical constant to every candidate
+    # state, which cancels when the weights are normalised.
+    s = _si_setup()
+    pars = (; α=0.05, β=0.3, m=4.0, ν=0.2, θʳ=0.9, θᶠ=0.9)
+    X = epidemic_simulator(s.data)(StableRNG(21), pars)
+    reset_aggregates!(s.data)
+    apply_derived_summaries!(pars, s.data, X)
+
+    affected_ids = (data, t, i) -> data.affected_individuals[t, i]
+    nlp = make_neighbor_logprob_from_transitions(s.data.trans_mat)
+    full = make_rest_contribution(affected_ids=affected_ids, neighbor_logprob=nlp,
+                                  coupled_mask=nothing)
+    # in the S/I model the focal only enters a neighbour's S -> I rate
+    mask = coupled_transition_mask([:S, :I], [(:S, :I)])
+    skipped = make_rest_contribution(affected_ids=affected_ids, neighbor_logprob=nlp,
+                                     coupled_mask=mask)
+
+    worst = 0.0
+    for i in 1:s.n_ind, t in 1:3:(s.n_t - 1)
+        wf = full(pars, s.data, X, i, t, s.data.n_states)
+        ws = skipped(pars, s.data, X, i, t, s.data.n_states)
+        worst = max(worst, maximum(abs.(wf ./ sum(wf) .- ws ./ sum(ws))))
+    end
+    @test worst < 1e-10
+end
+
+@testset "coupled_transition_mask: a coupled source couples ALL its transitions" begin
+    # The subtle part. Probabilities out of a state sum to one, so if the focal
+    # raises a neighbour's S -> I it necessarily lowers that neighbour's S -> S.
+    # Marking only the named transition is silently WRONG; the mask must cover
+    # every transition out of a coupled source state.
+    mask = coupled_transition_mask([:S, :E, :I, :D], [(:S, :E)])
+    @test mask[1, 2]            # S -> E, as named
+    @test mask[1, 1]            # S -> S, the complement — must be coupled too
+    @test mask[1, 4]            # S -> D, likewise out of S
+    @test !mask[2, 3]           # E -> I: nothing to do with the focal
+    @test !mask[3, 4]           # I -> D: likewise
+    @test !any(mask[4, :])      # D is not a coupled source at all
+end

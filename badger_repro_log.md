@@ -597,3 +597,74 @@ The profiler said otherwise, and it was right.
 overnight fit, and the coupling cache/memoisation remains available if more is
 needed. Correctness first: the cattle model still recovers 6/6 and all 92 tests
 pass after the change.
+
+### 2026-07-17 — `coupled_transitions`: 78 h -> 1.4 h, and a bug caught by insisting on the maths
+
+Arthur's idea: the package needn't recompute every neighbour's full transition
+matrix for every candidate focal state, because the focal only affects *some* of a
+neighbour's transitions. Let the user declare which. (Inferring it from the
+transition spec is possible later; user-declared is the easy first pass.)
+
+Implemented as `coupled_transitions=[(:S, :E)]` on `epidemic_data` — "the only way
+one badger affects another is through its force of infection, which only the S->E
+rate reads".
+
+**My first implementation was wrong, and Arthur's "make sure the math still
+balances" caught it.** I masked exactly the named transition, reasoning that a
+neighbour whose move isn't coupled contributes an identical constant to every
+candidate and cancels on normalisation. The reasoning was fine; the mask was not.
+Checked against the unmasked computation over 10,008 (i,t) cells:
+
+```
+worst absolute difference in NORMALISED weights: 0.2486
+*** DIFFERS - the skip is NOT valid ***
+```
+
+A quarter, in normalised weights — it would have silently corrupted the sampler.
+Diagnosing it took printing one neighbour's log-prob against each focal state:
+
+```
+neighbour j=31, move S->S, "not coupled":
+  logp per focal state:  -7.0e-6  -7.0e-6  -0.017593  -7.0e-6
+                            S        E         I         D
+```
+
+**`S -> S` moves with the focal's state.** Of course it does: probabilities out of
+a state sum to one, so if the focal being infectious raises a neighbour's `S -> E`,
+it necessarily lowers that neighbour's `S -> S` by the same amount. I had conflated
+"the transition whose RATE FUNCTION reads the aggregates" with "the transitions
+whose PROBABILITY depends on the focal". With `auto_self` the self-transition takes
+the leftover mass, so it is coupled too.
+
+The fix: the mask is the **closure** — every transition out of any state that has a
+coupled transition out of it. Re-checked:
+
+```
+worst absolute difference in NORMALISED weights: 1.3e-13
+IDENTICAL - the skip is exact
+```
+
+So declaring `[(:S, :E)]` skips only neighbours currently in `E`, `I` or `D` — but
+in this model 40% of cells are dead, and both gates are now permanent tests
+(`coupled_transitions: the skip is exact`, and one asserting a coupled source
+couples all its outgoing transitions).
+
+**The result:**
+
+| | original | after the type fixes | **after `coupled_transitions`** | total |
+|---|---|---|---|---|
+| one `loglik` | 3.02 s | 0.64 s | **0.52 s** | 5.8x |
+| one iFFBS individual | 0.118 s | 0.022 s | **0.002 s** | **59x** |
+| one full sweep (2384) | 4.7 min | 0.9 min | **~5 s** | **~56x** |
+| 1000 sweeps | 78 h | 14.7 h | **1.4 h** | **56x** |
+
+**78 hours to 1.4 hours**, exactly, with the sampler's answers unchanged to 1e-13.
+The `logProbRest` cache is no longer needed for this model.
+
+Lesson, and it is the same one twice now: I reasoned correctly about the *shape* of
+the optimisation and wrongly about its *precondition*, and only checking against
+the unoptimised path found it. "The maths must balance" is not a formality.
+
+Still to do: inferring the coupled set automatically from the transition spec —
+the package can see which rates touch the aggregates, in principle. User-declared
+works and is explicit, so this is a convenience, not a gap.

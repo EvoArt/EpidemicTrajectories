@@ -49,6 +49,7 @@ export no_observations
 
 # Transition matrices and the coupling term
 export transition_matrix_at, make_rest_contribution, no_rest_contribution
+export coupled_transition_mask
 export make_neighbor_logprob_from_transitions
 
 # The latent sampler

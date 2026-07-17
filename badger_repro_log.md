@@ -348,3 +348,55 @@ Brock1 6706→8143 (now spanning t=6–100), Brock2 3201→1764, **total unchang
 Lesson for the rest of this: the reference's parameters are not always what their
 name suggests. `xi` is not "which test applies when", it is an offset against a
 raw encoding that already has a changepoint baked in at 80.
+
+### 2026-07-17 — the model builds and evaluates; one package bug; performance is the wall
+
+`examples/badger_model.jl` — the whole badger base model as user code. It builds
+and every piece evaluates against the real data:
+
+- `@survival siler_survival death=:D` + `S -> E` + `E -> I` produced exactly
+  `(S,E), (E,I), (S,D), (E,D), (I,D)` — including the `I -> D` never written.
+- Transition matrix rows sum to 1; observation weights sensible; **loglik finite**
+  (-95,604) on the reference's own `Xinit`.
+- Both aggregates (`n_infectious`, `n_alive`) fill correctly, indexed by the
+  **time-varying** `social_group[i, t]`, with the `g == 0` ("not present") guard.
+
+**The design holds.** Four states, mortality, two coupled aggregates, a
+density-scaled FOI, an age-dependent survival curve, time-varying groups, six
+tests with three-way accuracy, and a capture process — all expressed as user code,
+with the package knowing none of it. That was the thing this exercise was meant to
+test.
+
+**One package bug, which only the badger model could find.** `_param_eltype` did
+`promote_type(map(typeof, values(model))...)`, which lands on `Any` when the
+parameters mix scalars with vectors (`(; beta=0.1, alpha=[...])`) — and
+`zeros(Any, n, n)` throws. The cattle model has only scalar parameters, so it
+never hit this. Fixed to reach through containers to the number type inside, and
+to ignore non-numeric entries.
+
+**Resolved, not a bug: progression = 0.993 at the initial values.** Open question
+1 in this log. My implementation is faithful — `erlang_cdf_at_1(k, tau/k)` with
+`k=1, tau=5` really is `1 - exp(-5) = 0.993`, and the reference computes the same.
+It is just a poor starting point; the prior is `Exponential(10)` and the sampler
+moves it. Not a discrepancy to chase.
+
+**Performance is the wall.** Measured on the real data (2384 badgers × 161 times):
+
+| | cost |
+|---|---|
+| one `loglik` | **3.0 s** (1.07 GiB allocated) |
+| one iFFBS individual | 0.118 s |
+| one iFFBS sweep (2384) | **~4.7 min** |
+| 1000 sweeps | **~78 hours** — and that is *before* NUTS |
+
+NUTS needs many gradient evaluations of that 3-second likelihood per sweep, so a
+full run is out of reach as things stand. This is the cost of our generic
+on-the-fly coupling: `make_rest_contribution` recomputes every affected
+individual's transition probabilities for each candidate state, at every
+(i, t) — the exact work the reference avoids with its `logProbRest` cache
+(rebuilt once per iteration, patched per individual).
+
+Next: verify correctness on a subsample (a few groups), which is the honest thing
+to do before optimising, and report timings rather than sink hours into a run
+that cannot finish. The memoisation idea in "Future performance work" above is
+now the obvious next step, not a someday-maybe.

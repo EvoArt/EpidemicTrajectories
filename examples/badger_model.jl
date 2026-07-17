@@ -206,6 +206,7 @@ function badger_data(dir; brock_changepoint=BROCK_CHANGEPOINT)
         social_group=d.social_group,
         age=d.age,
         capture=d.capture,
+        capt_effort=d.capt_effort,
         tests=d.tests,
         season=d.season,
         birth_time=d.birth_time,

@@ -151,6 +151,12 @@ end
 Build the [`EpidemicData`](@ref) for a model.
 
 - `trans_mat`: a [`TransitionSpec`](@ref) from [`@transitions`](@ref).
+- `coupling_trans_mat`: the [`TransitionSpec`](@ref) used for the COUPLING term
+  only — how likely a neighbour's realised move was, summed over the focal's
+  candidate states (see [`make_rest_contribution`](@ref)). Defaults to
+  `trans_mat`, which is almost always what you want. Supply a different one only
+  to give the coupling a cheaper equivalent of a rate — see the worked example in
+  its own section below, and read the warning there first.
 - `starting_state`: `(model, data, X, i, t) -> probability vector` over states at
   the individual's first timepoint.
 - `aggregates`: normally an [`@aggregate`](@ref) declaration — the package
@@ -192,8 +198,48 @@ works: it is converted with `Tuple(...)`.
 
 Remember to establish the aggregates-agree-with-`X` invariant before the first
 likelihood call; see [`apply_derived_summaries!`](@ref).
+
+**A separate `coupling_trans_mat`** (power users; skip unless the coupling term is
+your bottleneck). The three consumers of the rates are not equal:
+
+| consumer | spec used | differentiated? |
+|---|---|---|
+| [`epidemic_loglik`](@ref) | `trans_mat` | **yes** — this is the HMC/NUTS gradient |
+| [`forward_filter`](@ref) (iFFBS) | `trans_mat` | no |
+| the coupling term ([`make_rest_contribution`](@ref)) | `coupling_trans_mat` | no |
+
+The coupling term evaluates a rate `n_states × |affected_individuals|` times per
+`(i, t)` — by far the most rate calls in a sweep — and it is never differentiated.
+So it is the one place where a rate that CACHES a parameter-dependent quantity is
+both worthwhile and safe. Give it a spec whose rates read a value your derived
+summaries maintain, and leave `trans_mat` computing that value honestly:
+
+```julia
+# maintained by a derived summary, O(1) per individual, plain Float64
+cached_infection(model, data, i, t) = data.aggregates.foi[data.social_group[i, t], t]
+
+epidemic_data(;
+    trans_mat          = @transitions(STATES, begin S -> E = infection end),        # honest
+    coupling_trans_mat = @transitions(STATES, begin S -> E = cached_infection end), # cached
+    ...)
+```
+
+!!! warning "Never give a cached rate to `trans_mat`"
+    `trans_mat` is differentiated. A rate that returns a cached `Float64` computed
+    from the parameters *outside* the AD call is a CONSTANT to the AD backend, so
+    the gradient with respect to whatever fed that cache silently collapses to the
+    prior's gradient — while the log-density stays bit-identical, so nothing warns
+    you and the fit simply never moves those parameters. `coupling_trans_mat` is
+    safe from this by construction: the gradient never reaches it. Aggregates that
+    are pure functions of `X` (counts, say) are fine in `trans_mat` — they are
+    genuinely constant with respect to the parameters. It is caching a
+    *parameter-derived* quantity that breaks.
+
+The two specs must agree mathematically; the package cannot check that for you
+(and does not try), it only takes the two you hand it.
 """
 function epidemic_data(; n_individuals, n_timepoints, trans_mat,
+                         coupling_trans_mat=trans_mat,
                          starting_state, aggregates,
                          group=ones(Int, n_individuals),
                          observation_process=no_observations,
@@ -245,7 +291,10 @@ function epidemic_data(; n_individuals, n_timepoints, trans_mat,
         coupled_transition_mask(state_space, coupled_transitions)
 
     affected_ids = (data, t, i) -> affected_individuals[t, i]
-    neighbor_logprob = make_neighbor_logprob_from_transitions(trans_mat)
+    # The coupling term is the only rate consumer that is never differentiated, so
+    # it is the only one that may safely use a spec with cached, parameter-derived
+    # rates. Defaults to `trans_mat` — see this function's docstring.
+    neighbor_logprob = make_neighbor_logprob_from_transitions(coupling_trans_mat)
     rest_contribution = make_rest_contribution(affected_ids=affected_ids,
                                                neighbor_logprob=neighbor_logprob,
                                                coupled_mask=coupled_mask)

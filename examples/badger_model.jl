@@ -54,8 +54,8 @@ end
 function badger_infection(model, data, i, t)
     g = data.social_group[i, t]
     g == 0 && return 0.0                       # not present: no exposure
-    I = data.aggregates[:n_infectious][g, t]
-    M = data.aggregates[:n_alive][g, t]
+    I = data.aggregates.n_infectious[g, t]
+    M = data.aggregates.n_alive[g, t]
     M == 0 && return 0.0
 
     α_g = model.lambda * model.alpha[g]

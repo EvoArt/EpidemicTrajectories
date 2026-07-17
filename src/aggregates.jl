@@ -50,15 +50,17 @@ _invert_op(op) = op === :(+=) ? :(-=) :
                  op === :(/=) ? :(*=) :
                  error("Unsupported operator in a derived summary: $op (use +=, -=, *= or /=)")
 
-# Rewrite a bare aggregate name `n_infected[...]` into `data.aggregates[:n_infected][...]`,
-# so the user never writes the container lookup. Only names declared in the same
-# `@aggregate` block are rewritten.
+# Rewrite a bare aggregate name `n_infected[...]` into
+# `getproperty(data.aggregates, :n_infected)[...]`, so the user never writes the
+# container lookup. Only names declared in the same `@aggregate` block are
+# rewritten. `getproperty` on a NamedTuple with a literal symbol resolves at
+# compile time, so this costs nothing at run time.
 _sugar_agg(x, names) = x
 function _sugar_agg(ex::Expr, names)
     if ex.head === :ref && ex.args[1] isa Symbol && ex.args[1] in names
         arr = ex.args[1]
         idx = map(a -> _sugar_agg(a, names), ex.args[2:end])
-        return Expr(:ref, :(data.aggregates[$(QuoteNode(arr))]), idx...)
+        return Expr(:ref, :(getproperty(data.aggregates, $(QuoteNode(arr)))), idx...)
     end
     return Expr(ex.head, map(a -> _sugar_agg(a, names), ex.args)...)
 end
@@ -169,7 +171,7 @@ Declare the arrays to track during the latent update, together with their
 array and its update are declared in one place.
 
 - `@array name Type (dims...)` declares an array; refer to it by bare name in the
-  updates and in your rate functions (`data.aggregates[:name]`).
+  updates and in your rate functions (`data.aggregates.name`).
 - Each update line generates both a forward update and its reverse (`+=` ↔ `-=`,
   `*=` ↔ `/=`), which is what lets the sampler remove and re-apply an individual's
   contribution.
@@ -245,16 +247,20 @@ struct AggregateDeclaration
 end
 
 """
-    allocate_aggregates(decl::AggregateDeclaration) -> Dict{Symbol,Any}
+    allocate_aggregates(decl::AggregateDeclaration) -> NamedTuple
 
 Allocate the storage declared by [`@aggregate`](@ref).
+
+Returns a `NamedTuple`, not a `Dict`: the aggregates are read on the hot path
+(`data.aggregates.n_infected[g, t]` inside a rate function, millions of times), and
+a `Dict{Symbol,Any}` would hand back `Any` and force the arithmetic above it to
+dispatch at runtime and allocate. The names and element types are known here, so
+the container may as well be concretely typed.
 """
 function allocate_aggregates(decl::AggregateDeclaration)
-    d = Dict{Symbol,Any}()
-    for s in decl.specs
-        d[s.name] = zeros(s.eltype, s.dims...)
-    end
-    d
+    names = Tuple(s.name for s in decl.specs)
+    arrays = Tuple(zeros(s.eltype, s.dims...) for s in decl.specs)
+    return NamedTuple{names}(arrays)
 end
 
 """
@@ -267,7 +273,7 @@ Use together with [`apply_derived_summaries!`](@ref) to establish the invariant
 that the aggregates agree with a given `X` — see that function's docstring.
 """
 function reset_aggregates!(data)
-    for (_, v) in data.aggregates
+    for v in values(data.aggregates)
         v isa AbstractArray && fill!(v, zero(eltype(v)))
     end
     nothing

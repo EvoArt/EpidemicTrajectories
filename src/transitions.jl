@@ -22,19 +22,32 @@ function transition_matrix_at(trans_mat::TransitionSpec, model, data::EpidemicDa
     P = zeros(T, N, N)
     rowsum = zeros(T, N)
 
-    for (k, (from_sym, to_sym)) in enumerate(trans_mat.transitions)
-        a = _state_index(data, from_sym)
-        b = _state_index(data, to_sym)
-        p = trans_mat.rate_fns[k](model, data, i, t)
-        p = clamp(p, 1e-12, 1 - 1e-12)
-        P[a, b] += p
-        rowsum[a] += p
-    end
+    # `rate_fns` is a Tuple of DIFFERENT concrete function types, so iterating it
+    # with a plain loop would infer the element as a union/Any and dispatch on
+    # every call — this is the hub of the package, so that cost lands everywhere.
+    # `_fill_rates!` recurses over the tuple instead, specialising on one rate at a
+    # time, which keeps each call concrete.
+    _fill_rates!(P, rowsum, trans_mat.rate_fns, trans_mat.transitions, 1, model, data, i, t)
 
     for a in 1:N
         P[a, a] += (1 - rowsum[a])
     end
     P
+end
+
+# Recurse over the rate tuple one element at a time. Each step sees a concrete
+# function type, so the call devirtualises and the arithmetic stays unboxed.
+@inline _fill_rates!(P, rowsum, ::Tuple{}, transitions, k, model, data, i, t) = nothing
+@inline function _fill_rates!(P, rowsum, rates::Tuple, transitions, k, model, data, i, t)
+    @inbounds begin
+        from_sym, to_sym = transitions[k]
+        a = _state_index(data, from_sym)
+        b = _state_index(data, to_sym)
+        p = clamp(first(rates)(model, data, i, t), 1e-12, 1 - 1e-12)
+        P[a, b] += p
+        rowsum[a] += p
+    end
+    return _fill_rates!(P, rowsum, Base.tail(rates), transitions, k + 1, model, data, i, t)
 end
 
 # The working number type: whatever number type the parameters are made of. Under

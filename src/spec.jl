@@ -19,12 +19,18 @@ names in the order that fixes their integer encoding (state `k` in a trajectory
 the leftover probability mass, so the user only declares the transitions that
 actually move an individual.
 
+`rate_fns` is a `Tuple`, and the type is parameterised on it, so each rate's own
+concrete function type is known. That is a performance decision, not a style one:
+as a `Vector{Function}` every rate call in `transition_matrix_at` — the hub of the
+whole package, called for every individual at every timepoint — would be a runtime
+dispatch returning `Any`, and the arithmetic on the result would box.
+
 Build one with [`@transitions`](@ref) rather than calling this directly.
 """
-struct TransitionSpec
+struct TransitionSpec{RF<:Tuple}
     states::Vector{Symbol}
     transitions::Vector{Tuple{Symbol,Symbol}}
-    rate_fns::Vector{Function}
+    rate_fns::RF
     auto_self::Bool
 end
 
@@ -265,7 +271,7 @@ macro transitions(args...)
         TransitionSpec(
             $states_expr,
             Tuple{Symbol,Symbol}[$(trans_pairs...)],
-            Function[$(map(esc, rates)...)],
+            ($(map(esc, rates)...),),
             $(auto_self),
         )
     end

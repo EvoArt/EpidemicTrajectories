@@ -42,7 +42,7 @@ end
 # while it is being resampled, which is exactly the leave-one-out count the force
 # of infection needs.
 function infection_func(model, data, i, t)
-    I_minus = data.aggregates[:n_infected][data.group[i], t]
+    I_minus = data.aggregates.n_infected[data.group[i], t]
     -expm1(-(model.α + model.β * I_minus))
 end
 

@@ -668,3 +668,56 @@ the unoptimised path found it. "The maths must balance" is not a formality.
 Still to do: inferring the coupled set automatically from the transition spec —
 the package can see which rates touch the aggregates, in principle. User-declared
 works and is explicit, so this is a convenience, not a gap.
+
+### 2026-07-17 — wiring into PracticalBayes; the nu simplex; the likelihood's matrix waste
+
+`examples/badger_fit.jl`: the model wired into PracticalBayes as
+`Gibbs(NUTS(13 continuous blocks) + conjugate(etas, nu) + iFFBS(X))`, with the
+reference's own priors.
+
+**A real modelling bug of mine, caught by a `DomainError`.** I declared
+`nuE ~ filldist(Beta(1,1), n_nu)` and `nuI` likewise — independently. But the
+starting state is `(1 - nuE - nuI, nuE, nuI)`: they are two components of ONE
+simplex, and independent Betas let them sum past 1, making the susceptible
+probability negative. The likelihood takes its log. The reference uses
+`Dirichlet([8,1,1])` for exactly this reason. Fixed: `nu` is now a single
+`n_nu × 2` latent with a `NuSimplex` prior that draws a proper Dirichlet, updated
+only by the conjugate kernel.
+
+Note `NuSimplex <: DiscreteMatrixDistribution` despite holding continuous values.
+That is deliberate and worth remembering: **in PracticalBayes it is the DISCRETE
+declaration that routes a site to the value store**, where a latent kernel owns it
+and NUTS never touches it. Declared continuous, `nu` went to NUTS and died on
+`linked_vec_length` — and NUTS could not have handled a simplex it knows nothing
+about anyway. Same mechanism carries `X`.
+
+**Then: is the slowness PracticalBayes or us?** (Arthur's question.) Profiled a
+real gradient through `LogDensityFunction` — what NUTS actually calls:
+
+```
+ self%  total%  gc?  dispatch?  function   file:line
+  33.2    95.8    Y      Y      loglik     src/build.jl:84
+  14.7    14.7    Y      -      Array      boot.jl:479
+  13.1    13.1    Y      -      Array      boot.jl:477
+  12.0    12.0    -      -      setindex!  array.jl:1021
+```
+
+**Ours, unambiguously.** PracticalBayes' machinery does not appear at all; `loglik`
+is 95.8% of total, and ~40% of self time is `Array`/`setindex!` — pure allocation.
+Corroborating: one gradient over 9 scalars cost only 2.3x a bare loglik, which is
+healthy for ForwardDiff. The gradient machinery was never the problem; the
+likelihood is just expensive and NUTS calls it ~32 times a sweep.
+
+**The waste**: `loglik` built a whole `n_states × n_states` transition matrix for
+every `(i, t)` — 2384 × 160 = **381,000 matrix allocations per likelihood call**,
+of Dual numbers under AD — in order to read **one entry**, the move the individual
+actually made. It also evaluated all five transition rates when one was wanted.
+
+Added `transition_prob(trans_mat, model, data, X, i, t, from, to)`: walks the rate
+tuple once, accumulating only the requested entry and the row total (for the
+`auto_self` leftover). The sampler still uses the full matrix — it genuinely needs
+every entry. Verified entry-for-entry against `transition_matrix_at` to 1e-12,
+including the self-transition, and that is now a permanent test.
+
+**Gradient: 7.4 s → 3.63 s**, and the `Array`/`setindex!` rows vanished from the
+profile entirely. 100 tests pass.

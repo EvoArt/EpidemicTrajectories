@@ -81,8 +81,13 @@ function epidemic_loglik(data::EpidemicData)
 
         for t in 1:(data.n_timepoints - 1)
             for i in 1:data.n_individuals
-                P = transition_matrix_at(data.trans_mat, model, data, X, i, t)
-                ll += log(P[X[t, i], X[t + 1, i]] + 1e-12)
+                # Only ONE entry of the transition matrix matters here: the move
+                # this individual actually made. `transition_prob` computes just
+                # that, rather than building the whole matrix per (i, t) — which
+                # dominated the gradient (~380k matrix allocations per call).
+                p = transition_prob(data.trans_mat, model, data, X, i, t,
+                                    X[t, i], X[t + 1, i])
+                ll += log(p + 1e-12)
             end
         end
 

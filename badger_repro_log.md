@@ -767,6 +767,19 @@ The dominant dispatch at `transition_prob` suggests the issue is in the rate fun
 **Recommended next step:**
 Use `@code_warntype` on `transition_prob` with the actual badger model to see where inference breaks, then trace back to the source. Tools like `JET.jl` or `Cthulhu.jl` could also help diagnose the type instability.
 
+### 2026-07-17 — investigating remaining iFFBS timing gap and PolyesterForwardDiff performance
+
+Now profiling the reference iFFBS to understand the remaining performance gap. Current iFFBS timings:
+
+| Implementation | iFFBS sweep (median) |
+|----------------|---------------------|
+| Reference      | 1.708s              |
+| Package        | ~5s (estimated)     |
+
+After closing the iFFBS gap, we should investigate why PolyesterForwardDiff is twice as slow on our code compared to the reference. The reference uses DifferentiationInterface's storage for in-place evaluation, which may explain the difference. This performance gap might only be noticeable for PolyesterForwardDiff because it is so fast (making overhead more apparent).
+
+**Note:** The reference code uses multithreading in iFFBS to update transition probabilities, which likely contributes to its performance advantage.
+
 ### 2026-07-17 — the actual root cause: `EpidemicData.trans_mat` was unparametrized
 
 Picked back up with a priority from Arthur: find and fix the runtime dispatch
@@ -1055,3 +1068,161 @@ being called per-individual). That asymmetry applies to `forward_filter`'s
 per-timepoint `transition_matrix_at!` call too, not just the likelihood. Not
 confirmed as the cause of the remaining gap — would need the same
 profile-then-instrument discipline as above before touching it.
+
+### 2026-07-17 — closing the iFFBS gap: `coupling_trans_mat`, a power-user seam
+
+What we are chasing, and how, written down before the code so the reasoning can be
+checked against the result rather than reconstructed after it.
+
+**The target.** Our iFFBS sweep is ~2.6-2.9s; the reference's is ~1.47s. The
+gradient is NOT the target — it is already at parity (0.113s vs the reference's
+0.108s median, ForwardDiff; 0.063s vs 0.033s under PolyesterForwardDiff, which
+now works on our side after PracticalBayes commit f708858).
+
+**Where the time is, measured not guessed.** Profiling the sweep sorted by TOTAL%
+(not self%):
+
+```
+iffbs_individual!    98.2%
+  forward_filter     84.3%
+    rest_contribution   69.5%     <- the coupling term
+      transition_prob   65.8%
+```
+
+The coupling term owns ~70% of the sweep. Worth recording that the SELF%-sorted
+table of the same profile shows `rest_contribution` at 6.4% and looks completely
+flat — reading that table, this entry nearly got written as "the coupling loop is
+NOT the bottleneck, the logProbRest idea is wrong-targeted". Self% attributes
+cycles to leaf arithmetic (`getindex`, `muladd`, `fma_llvm`, `exp`); it does not
+tell you which caller drives them. **Sort by total when the question is "what
+should I change", by self when the question is "what is this line doing".** Third
+time this session that self% nearly sent the work in the wrong direction.
+
+**Why it costs that much.** `rest_contribution` (transitions.jl) answers a
+counterfactual: for each of the `n_states` candidate states of the focal `i` at
+time `t`, apply the user's summaries, loop over EVERY affected neighbour `j`
+calling `neighbor_logprob`, then reverse the summaries. That is
+`n_states × |affected|` rate evaluations per `(i, t)` — on badgers, 4 × ~70
+groupmates × ~78 timepoints × 2384 individuals. The reference does not have this
+loop at all: it keeps `logProbRest[s, j, t]` / `logProbRestTotal[s, t]` and
+patches them incrementally per individual (`updaters.jl:290`), so its coupling
+cost is an O(1) array read.
+
+**Three designs considered, two rejected.**
+
+1. *Memoise the transition funcs generically, dropping `i` and `t` from the key.*
+   Rejected: the package cannot know what `(i,t)` REDUCES to. `badger_infection`
+   reduces it to `(g,t)`; `siler_survival` to `(age[i,t], t<=last_capture[i])`;
+   `badger_progression` to `()`. Those mappings live in user code behind arbitrary
+   data lookups. A generic "drop `i`" rule would silently return one badger's rate
+   for another. A user-declared cache key (`@cached (data.social_group[i,t], t)
+   badger_infection`) would be sound, but then hits the invalidation problem below.
+
+2. *Package-side `logProbRest[s, j, t]` cache, built from the counterfactuals
+   `rest_contribution` already runs.* Genuinely generic — the package knows
+   `n_states`, the user already declares `affected_individuals[t,i]` (which `j`
+   are affected) and `coupled_transitions` (which of `j`'s moves are sensitive),
+   so invalidation IS derivable from what we already have. Rejected on expected
+   value, not correctness: on badgers `affected_individuals[t,i]` IS the focal's
+   groupmates, so resampling `i` dirties ~70 neighbour-entries — roughly
+   everything we would have cached. The reference only gets away with the
+   per-individual cache because a GROUP-level cache (`logProbStoSgivenSorE[g,t]`,
+   34×161) sits underneath it: an individual's move dirties one group-cell, not 70
+   neighbour-cells. So the group-level array is the load-bearing part, and the
+   per-individual array is bookkeeping on top of it.
+
+3. **Chosen: let the power user supply the group-level array, via a separate
+   transition spec for the coupling term.** The user already CAN maintain a
+   `foi[g,t]` array — a derived summary that recomputes one cell from the counts
+   the other summaries just updated, O(1) per individual. What they could not do
+   is use it, because the one rate spec (`trans_mat`) serves both the AD
+   likelihood and the sampler, and a Float64 FOI cache read under AD freezes the
+   parameter dependence (measured: gradient w.r.t. lambda/alpha/beta/q collapses
+   to the PRIOR gradient, ~±1 instead of +300/-195/-20/+26 — while the
+   log-density stays BIT-IDENTICAL, so nothing warns you; see the
+   `badger_model_foicache.jl` check earlier today).
+
+**The seam already exists.** `rest_contribution` reaches the rates only through
+`neighbor_logprob`, a closure `make_rest_contribution` already accepts as a
+keyword. `epidemic_data` simply hard-wires it to `trans_mat` (data.jl:248). So:
+
+```julia
+epidemic_data(...; coupling_trans_mat = trans_mat)   # default: unchanged behaviour
+```
+
+- `trans_mat` → the honest recomputing rate. Used by `epidemic_loglik` (AD) and
+  `forward_filter`. Unchanged.
+- `coupling_trans_mat` → the cached rate. Used ONLY by `neighbor_logprob`, i.e.
+  only inside `rest_contribution`, which the AD path never reaches.
+
+This is why it is safe where the earlier all-in-one FOI cache was not: the cached
+spec is structurally unreachable from the gradient, not merely kept away from it
+by discipline. The package stays ignorant — it does not know one spec is "cached",
+only that it was handed two, exactly like `coupled_transitions` is a pure
+optimisation it takes on trust.
+
+**Known sharp edge:** nothing stops a user passing a cached spec as the MAIN
+`trans_mat` and silently getting the frozen gradient measured above. Documented
+loudly; a build-time check that both specs agree at one `(i,t)` would catch the
+common case cheaply.
+
+**Prediction to check against.** If the coupling term is 70% of the sweep and the
+FOI redundancy is ~70 individuals per group, caching it should take a large bite
+out of that 70% — but `transition_prob` also evaluates the survival and
+progression rates, which this does NOT cache, so the sweep will not fall to the
+reference's 1.47s. Anything from "no change" (in which case the FOI arithmetic was
+never the cost inside that loop, and the remaining gap is elsewhere) to ~1.5-2x is
+consistent with what is known. Recorded here so the benchmark can contradict it.
+
+**The result: the seam works, the cache pays ~1.19x, and the prediction landed at
+its pessimistic end.** Six variants, one clean sequential run, warm-up excluded:
+
+| variant | iFFBS (median) | gradient (median) |
+|---|---|---|
+| reference — ForwardDiff | **0.98s** | 0.091s |
+| reference — PolyesterForwardDiff | 1.201s | **0.033s** |
+| package — ForwardDiff | 2.527s | 0.112s |
+| package — PolyesterForwardDiff | 2.467s | 0.063s |
+| package — ForwardDiff + cached-FOI coupling | **2.12s** | 0.110s |
+| package — Polyester + cached-FOI coupling | **2.117s** | 0.061s |
+
+Two things confirmed, one refuted.
+
+*Confirmed — the seam does what it is for.* The gradient is unmoved (0.112 → 0.110s;
+0.063 → 0.061s, i.e. noise) while the sweep improves, which is exactly the
+signature of a cached rate confined to the coupling term. The pre-flight gate said
+the same thing more strictly: gradient bit-identical to base on all 61 parameters
+(max|diff| = 0.000e+00), including the four (lambda/alpha/beta/q) that collapsed
+to the prior gradient when the same file wrongly fed the cached spec to
+`trans_mat`. Same model file, same cache, one line different — broken vs exact.
+
+*Confirmed — the cache pays.* 2.527 → 2.12s and 2.467 → 2.117s: ~1.19x, consistent
+across both AD backends, for one keyword and one changed line.
+
+*Refuted — FOI redundancy is NOT the substance of the coupling cost.* The
+prediction allowed anything from "no change" to ~1.5-2x; the outcome is ~1.19x,
+the pessimistic end. If the ~70-individuals-per-group FOI recomputation were what
+made `rest_contribution` 70% of the sweep, caching it should have taken a far
+bigger bite. It did not. So the coupling term is expensive because of the LOOP
+ITSELF — `n_states` candidate states × ~70 neighbours × (apply summaries, call
+`transition_prob`, reverse summaries) per `(i, t)` — not because of the arithmetic
+inside one rate call. Cheapening each iteration is not where the money is.
+
+**Which is evidence FOR the design rejected earlier in this entry.** The reference
+does not win by making iterations cheaper; it wins by not having the loop at all
+(`logProbRestTotal[s, t]` is an O(1) read, patched incrementally by
+`updateLogProbRestTotalIndiv!`). Option 2 above (package-side `logProbRest[s,j,t]`
+cache) was rejected on expected value — the guess being that on badgers a focal
+dirties ~70 neighbour-entries, i.e. most of what was cached. That guess is now the
+only thing standing between us and the remaining gap, and it is still a guess. The
+cheap measurement that would settle it: instrument one sweep, count `(s,j,t)`
+entries reused vs recomputed. If reuse is low the idea is dead regardless of how
+cleanly it is expressed; if high, we know the ceiling before building.
+
+**Gap now.** ~2.12s vs the reference's 0.98-1.47s (note the reference's own iFFBS
+varies run to run — 1.468s in the previous session's run, 0.98s in this one, both
+single post-warm-up samples; ours is stable at 2.1-2.6 across runs). So call it
+1.5-2x, down from ~6x at the start of the day. The gradient is at parity on
+ForwardDiff (0.110s vs 0.091s) and ~2x adrift on PolyesterForwardDiff (0.061s vs
+0.033s) — the latter is a new observation, not yet investigated, and worth noting
+that PolyesterForwardDiff buys the reference 2.8x but us only 1.8x.

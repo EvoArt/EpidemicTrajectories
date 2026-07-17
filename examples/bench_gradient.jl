@@ -8,8 +8,12 @@
 # compilation cost (which can dominate a single sample) never lands in the timed
 # statistics — see bench_ref.jl's equivalent treatment on the reference side.
 #
-# Run:  julia --project=examples examples/bench_gradient.jl [backend]
+# Run:  julia --project=examples examples/bench_gradient.jl [backend] [model]
 #   backend ∈ {forwarddiff, polyesterforwarddiff}   (default: forwarddiff)
+#   model   ∈ {base, foicache}                      (default: base)
+#     base     — badger_model.jl: the FOI is recomputed per individual
+#     foicache — badger_model_foicache.jl: the FOI is cached per (group, time) by
+#                a power-user derived summary, and the rate function reads it back
 # Env:  BENCH_NGRAD (gradient evaluations, default 15)
 #       BENCH_NSWEEP (iFFBS sweeps, default 3)
 ENV["BADGER_RUN"] = "0"   # badger_fit.jl auto-runs run_badger_fit() unless told not to
@@ -22,6 +26,22 @@ which_backend = length(ARGS) >= 1 ? ARGS[1] : "forwarddiff"
 adtype = which_backend == "polyesterforwarddiff" ? ADTypes.AutoPolyesterForwardDiff(; chunksize=nothing) :
          which_backend == "forwarddiff" ? ADTypes.AutoForwardDiff() :
          error("unknown backend '$which_backend', use forwarddiff|polyesterforwarddiff")
+
+which_model = length(ARGS) >= 2 ? ARGS[2] : "base"
+which_model in ("base", "foicache") ||
+    error("unknown model '$which_model', use base|foicache")
+
+# badger_fit.jl already built `data`/`raw`/`loglik`/`latent!` for the BASE model at
+# include time. The foicache variant needs its own EpidemicData (different
+# transitions, different aggregates, different summaries), so rebuild those three
+# against it — everything downstream reads these names, not badger_fit.jl's.
+if which_model == "foicache"
+    include(joinpath(@__DIR__, "badger_model_foicache.jl"))
+    b_fc = badger_data_foicache(DATA_DIR)
+    data, raw = b_fc.data, b_fc.raw
+    loglik = epidemic_loglik(data)
+    latent! = epidemic_latent_sampler(data)
+end
 
 init0 = badger_initial_params(raw; rng=StableRNG(13))
 X0 = copy(raw.X_init)
@@ -38,7 +58,7 @@ m = badger_base(data, data.n_timepoints, data.n_individuals, G, NT, NS, NNU, log
 nuts_names = (:tau, :alpha, :lambda, :beta, :q, :c1, :a1, :b1, :a2, :b2, :thetas, :rhos, :phis)
 layout, theta0, store0 = build_layout(m; flat=nuts_names,
                                       values=(:X, :etas, :nu), init=init)
-println("=== Package benchmark: backend=$which_backend ===")
+println("=== Package benchmark: backend=$which_backend  model=$which_model ===")
 println("NUTS parameter vector length: ", length(theta0))
 
 ldf = PracticalBayes.LogDensityFunction(m, layout, store0, adtype; θ0=theta0)
@@ -59,7 +79,6 @@ println("  min=", round(minimum(grad_times), digits=3), "s  mean=", round(mean(g
 # exactly as a real Gibbs run would (each sweep conditions on the previous one's
 # result), which is also why the warm-up sweep's STATE change is kept even though
 # its TIME isn't recorded.
-latent! = epidemic_latent_sampler(data)
 rng = StableRNG(1)
 # The rate functions read `model.nu` (the combined S/E/I mixing matrix), not the
 # separate nuE/nuI fields badger_initial_params returns — same merge `init`/`ldf`

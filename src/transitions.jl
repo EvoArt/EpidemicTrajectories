@@ -35,6 +35,49 @@ function transition_matrix_at(trans_mat::TransitionSpec, model, data::EpidemicDa
     P
 end
 
+"""
+    transition_prob(trans_mat, model, data, X, i, t, from, to) -> probability
+
+The probability of one specific transition `from -> to` for individual `i` at time
+`t` — the single entry of [`transition_matrix_at`](@ref)'s matrix, without
+building the matrix.
+
+This exists because the likelihood only ever wants one entry per `(i, t)`: the
+move the individual actually made. Going through the full matrix there allocates a
+fresh `n_states × n_states` array and evaluates every rate, for every individual at
+every timepoint — on the badger model that is ~380k matrix allocations per
+likelihood call, each of Dual numbers under AD. The sampler still uses the full
+matrix, because it genuinely needs every entry.
+
+Respects `auto_self`: a self-transition takes whatever probability mass the
+declared transitions out of that state leave behind.
+"""
+function transition_prob(trans_mat::TransitionSpec, model, data::EpidemicData, X, i, t, from::Int, to::Int)
+    T = _param_eltype(model)
+    p_to = zero(T)          # mass on the requested move
+    rowsum = zero(T)        # total mass leaving `from` via declared transitions
+    _accum_row(trans_mat.rate_fns, trans_mat.transitions, 1, from, to, model, data, i, t,
+               p_to, rowsum, T)
+end
+
+# Walk the rate tuple once, accumulating only what the `from` row needs: the
+# requested entry, and the row's total (for the self-transition's leftover).
+# Recursive for the same reason as `_fill_rates!` — one concrete rate type per step.
+@inline function _accum_row(::Tuple{}, transitions, k, from, to, model, data, i, t, p_to, rowsum, ::Type{T}) where {T}
+    # A self-transition takes the mass the declared transitions leave behind.
+    return from == to ? p_to + (one(T) - rowsum) : p_to
+end
+@inline function _accum_row(rates::Tuple, transitions, k, from, to, model, data, i, t, p_to, rowsum, ::Type{T}) where {T}
+    @inbounds f, s = transitions[k]
+    if _state_index(data, f) == from
+        p = clamp(first(rates)(model, data, i, t), 1e-12, 1 - 1e-12)
+        rowsum += p
+        _state_index(data, s) == to && (p_to += p)
+    end
+    return _accum_row(Base.tail(rates), transitions, k + 1, from, to, model, data, i, t,
+                      p_to, rowsum, T)
+end
+
 # Recurse over the rate tuple one element at a time. Each step sees a concrete
 # function type, so the call devirtualises and the arithmetic stays unboxed.
 @inline _fill_rates!(P, rowsum, ::Tuple{}, transitions, k, model, data, i, t) = nothing

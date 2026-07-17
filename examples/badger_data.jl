@@ -43,6 +43,8 @@ Returns a NamedTuple with, among others:
   moves between groups, so this genuinely varies with `t`; 0 means "not present")
 - `age` — `[i, t]`, age in timesteps (`-10` before birth)
 - `capture` — `[t, i]`, 1 if captured
+- `capt_effort` — `[g, t]`, 1 if the group was trapped at all (a badger can only
+  be caught where effort was made; the capture-probability update needs this)
 - `tests` — `[t, i, test]`, the six test results (`-1` = not tested)
 - `sampling_period` — `(first, last)` per individual
 - `birth_time`, `last_capture_time`, `season`, `nu_times`, `sex`, `K`, `k`
@@ -61,6 +63,7 @@ function load_badger_data(dir; brock_changepoint=BROCK_CHANGEPOINT, known_sex_on
     Xinit_raw = Matrix(rd("Xinit.csv"))                 # [i, t], sparse codes
     test_mat = Matrix{Float64}(rd("TestMat.csv"))       # long: time, id, group, 6 tests
     capt_hist = Matrix{Int}(rd("CaptHist.csv"))         # [i, t]
+    capt_effort = Matrix{Int}(rd("CaptEffort.csv"))     # [g, t]: was the group trapped?
     birth_time = vec(Matrix{Int}(rd("birthTimes.csv")))
     start_period = vec(Matrix{Int}(rd("startSamplingPeriod.csv")))
     end_period = vec(Matrix{Int}(rd("endSamplingPeriod.csv")))
@@ -145,8 +148,8 @@ function load_badger_data(dir; brock_changepoint=BROCK_CHANGEPOINT, known_sex_on
     sampling_period = [(start_period[i], end_period[i]) for i in 1:m]
 
     return (; n_individuals=m, n_timepoints=maxt, n_groups, n_tests, n_seasons,
-            n_nu_times, X_init, social_group, age, capture, tests, sampling_period,
-            birth_time, last_capture_time, season, nu_times, sex, K, k)
+            n_nu_times, X_init, social_group, age, capture, capt_effort, tests,
+            sampling_period, birth_time, last_capture_time, season, nu_times, sex, K, k)
 end
 
 """

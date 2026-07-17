@@ -111,7 +111,7 @@ function badger_starting_state(model, data, X, i, t)
     if data.birth_time[i] < start_time
         idx = findfirst(==(start_time), data.nu_times)
         if idx !== nothing
-            nuE, nuI = model.nuE[idx], model.nuI[idx]
+            nuE, nuI = model.nu[idx, 1], model.nu[idx, 2]
         end
     end
     p[1] = 1.0 - nuE - nuI      # S
@@ -238,6 +238,8 @@ function badger_initial_params(d; rng=Random.default_rng())
        rhos=rand(rng, Uniform(0.2, 0.8), d.n_tests),
        phis=rand(rng, Uniform(0.7, 1), d.n_tests),
        etas=rand(rng, Beta(1, 1), d.n_seasons),
-       nuE=rand(rng, Uniform(0.05, 0.2), d.n_nu_times),
-       nuI=rand(rng, Uniform(0.05, 0.2), d.n_nu_times))
+       # nuE and nuI are two components of one simplex — see NuSimplex in
+       # badger_fit.jl. Draw them together so they cannot sum past 1.
+       nuE=[p[2] for p in eachcol(rand(rng, Dirichlet([8.0, 1.0, 1.0]), d.n_nu_times))],
+       nuI=[p[3] for p in eachcol(rand(rng, Dirichlet([8.0, 1.0, 1.0]), d.n_nu_times))])
 end

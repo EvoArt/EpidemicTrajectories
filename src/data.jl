@@ -37,8 +37,17 @@ box, which measured ~18x slower with ~500k allocations per 20k evaluations. With
 NamedTuple the element type is known, and the same code allocates nothing. It costs
 the user nothing: they still put whatever they like in, and the package still never
 looks inside.
+
+`derived_summaries` is likewise parameterised (`DS<:Tuple`), for the same reason as
+`trans_mat`'s `RF`: each summary is a distinct closure, and storing them behind an
+abstract `Vector{Function}` field erases that at every read, forcing `for ds in
+data.derived_summaries` (the iFFBS sweep, the simulator, and the coupling term in
+`make_rest_contribution`) through runtime dispatch on every call. Confirmed via
+profiling: this alone accounted for the bulk of a ~6x gap between the badger
+model's iFFBS sweep and its reference-implementation counterpart, matching the
+same pattern found earlier for `trans_mat` — see the devlog/repro log for both.
 """
-struct EpidemicData{SS,OP,RC,EX<:NamedTuple,AG<:NamedTuple,RF<:Tuple}
+struct EpidemicData{SS,OP,RC,EX<:NamedTuple,AG<:NamedTuple,RF<:Tuple,DS<:Tuple}
     n_individuals::Int
     n_timepoints::Int
     n_states::Int
@@ -49,7 +58,7 @@ struct EpidemicData{SS,OP,RC,EX<:NamedTuple,AG<:NamedTuple,RF<:Tuple}
     trans_mat::TransitionSpec{RF}
     starting_state::SS
     observation_process::OP
-    derived_summaries::Vector{Function}
+    derived_summaries::DS
     rest_contribution::RC
     affected_individuals::Union{Nothing,Matrix{Vector{Int}}}
     extras::EX
@@ -175,8 +184,11 @@ Build the [`EpidemicData`](@ref) for a model.
 
 **Verbose fallback** (for an aggregate `@aggregate` cannot express): pass
 `aggregates` as a plain `Dict{Symbol,Any}` of your own arrays and
-`derived_summaries` as a vector of functions
-`(model, data, X, s, i, t; reverse=false)` that honour `reverse` themselves.
+`derived_summaries` as a collection of functions
+`(model, data, X, s, i, t; reverse=false)` that honour `reverse` themselves — a
+`Tuple` is preferred (each summary keeps its own concrete type all the way
+through, same reasoning as `TransitionSpec`'s `rate_fns`), but any iterable
+works: it is converted with `Tuple(...)`.
 
 Remember to establish the aggregates-agree-with-`X` invariant before the first
 likelihood call; see [`apply_derived_summaries!`](@ref).
@@ -249,7 +261,7 @@ function epidemic_data(; n_individuals, n_timepoints, trans_mat,
         trans_mat,
         starting_state,
         observation_process,
-        Vector{Function}(collect(derived_summaries)),
+        Tuple(derived_summaries),
         rest_contribution,
         affected_individuals,
         NamedTuple(extras),

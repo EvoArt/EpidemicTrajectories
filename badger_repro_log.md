@@ -308,3 +308,43 @@ E -> I = prog; end` yields (S,E), (E,I), (S,D), (E,D), (I,D) — the badger
 structure, with the two death transitions the user never wrote. 84 → 92 tests.
 
 All four anticipated package changes are now done. Next: the badger model itself.
+
+### 2026-07-17 — data loader, and a misunderstanding of the changepoint
+
+Wrote `examples/badger_data.jl` (user code: reads the CSVs, filters, converts the
+reference's conventions to ours). Two conventions differ and are converted on
+load: the reference is individual-major (`X[i,t]`) where we are time-major
+(`X[t,i]`), and it encodes states sparsely (S=0, E=3, I=1, D=9) where we use the
+position in `state_space` (S=1, E=2, I=3, D=4).
+
+What the data turns out to be, after the known-sex filter (2391 → **2384**
+badgers, matching the reference), over 161 timepoints and 34 groups:
+
+- All four states occur, and **40% of cells are dead** — mortality is a dominant
+  feature of this model, unlike the cattle model which has none.
+- **505 badgers change social group.** Time-varying membership is real, not
+  hypothetical. Good thing the package supports it (see the previous entry).
+- 12,430 captures, 25,521 test results across the six tests.
+
+**I got the changepoint wrong, and the data caught it.** My first
+`apply_brock_changepoint!` blanked whichever Brock column "didn't apply" at each
+time — I had assumed `xi` decides which column is valid when. Checking against the
+raw data showed Brock1 spans t=6–80 and Brock2 t=81–125 **already**, and my code
+silently destroyed 1675 Brock2 results (3493 → 1684).
+
+Re-reading the reference: `TestField = TestMatAsField_CORRECTED(TestMat_infer, m)`
+builds the test field **straight from the raw columns, with no `xi` applied**. So
+the raw data is already correct *at the initial* `xi = 80`, and `xi` only ever
+acts incrementally — `TestMatAsFieldProposal` **swaps** the Brock1/Brock2 columns
+for tests lying between the current and proposed changepoint. Confirmed in the
+window t=80..100: Brock1 has 92 results, Brock2 has 1675, and **never both** —
+each occasion fills exactly one column, so a swap is lossless.
+
+So fixing the changepoint at 101 means: take the raw data and swap the two Brock
+columns for the tests in `[80, 101)`. Now implemented that way, and verified —
+Brock1 6706→8143 (now spanning t=6–100), Brock2 3201→1764, **total unchanged at
+9907**, and the other four tests untouched.
+
+Lesson for the rest of this: the reference's parameters are not always what their
+name suggests. `xi` is not "which test applies when", it is an offset against a
+raw encoding that already has a changepoint baked in at 80.

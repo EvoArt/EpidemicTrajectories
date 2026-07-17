@@ -28,17 +28,23 @@ adtype = which_backend == "polyesterforwarddiff" ? ADTypes.AutoPolyesterForwardD
          error("unknown backend '$which_backend', use forwarddiff|polyesterforwarddiff")
 
 which_model = length(ARGS) >= 2 ? ARGS[2] : "base"
-which_model in ("base", "foicache") ||
-    error("unknown model '$which_model', use base|foicache")
+which_model in ("base", "foicache", "reststotal") ||
+    error("unknown model '$which_model', use base|foicache|reststotal")
 
 # badger_fit.jl already built `data`/`raw`/`loglik`/`latent!` for the BASE model at
-# include time. The foicache variant needs its own EpidemicData (different
-# transitions, different aggregates, different summaries), so rebuild those three
-# against it — everything downstream reads these names, not badger_fit.jl's.
+# include time. The other variants need their own EpidemicData (different
+# transitions, aggregates, summaries, coupling), so rebuild those against it —
+# everything downstream reads these names, not badger_fit.jl's.
 if which_model == "foicache"
     include(joinpath(@__DIR__, "badger_model_foicache.jl"))
     b_fc = badger_data_foicache(DATA_DIR)
     data, raw = b_fc.data, b_fc.raw
+    loglik = epidemic_loglik(data)
+    latent! = epidemic_latent_sampler(data)
+elseif which_model == "reststotal"
+    include(joinpath(@__DIR__, "badger_model_reststotal.jl"))
+    b_rt = badger_data_reststotal(DATA_DIR)
+    data, raw = b_rt.data, b_rt.raw
     loglik = epidemic_loglik(data)
     latent! = epidemic_latent_sampler(data)
 end

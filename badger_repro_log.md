@@ -721,3 +721,182 @@ including the self-transition, and that is now a permanent test.
 
 **Gradient: 7.4 s → 3.63 s**, and the `Array`/`setindex!` rows vanished from the
 profile entirely. 100 tests pass.
+
+### 2026-07-17 — gradient benchmarking against reference implementation
+
+Ran comparative gradient benchmarks between the EpidemicTrajectories package and the reference implementation on the badger dataset to measure AD performance.
+
+**Setup:**
+- Dataset: 2384 badgers × 161 timepoints × 34 groups, 6 tests
+- AD Backend: ForwardDiff (AutoForwardDiff) for both
+- Reference: `badger_ref/bench_ref.jl` (61 continuous parameters)
+- Package: `examples/bench_badger_fit.jl` (PracticalBayes LogDensityFunction)
+
+**Results:**
+
+| Implementation | Gradient Eval (median) | Speedup |
+|----------------|------------------------|---------|
+| Reference      | 0.194s                 | 11.3x   |
+| Package        | 2.188s                 | 1x      |
+
+The reference implementation shows significantly faster gradient computation (~11x speedup). Both use ForwardDiff on the same dataset.
+
+**Profiling findings:**
+User profiled the package gradient computation and found that almost all time was spent on dynamic dispatching at:
+- `src/build.jl:97` — `transition_prob` call (dominant)
+- `src/build.jl:99` — `log(p + 1e-12)` (secondary)
+
+This suggests the package's gradient computation is still type-unstable or has excessive runtime dispatch compared to the reference's hand-tuned implementation. The reference likely has more specialized, type-stable code paths for gradient evaluation.
+
+**Potential optimization question:**
+Can we move `_param_eltype(model)` out of the hot loop (currently computed at `src/transitions.jl:56-57`) and pass it to `transition_prob`? This might help with type stability and reduce runtime dispatch. Diagnosing the runtime dispatch will likely close most of the speed gap.
+
+**Analysis of runtime dispatch source (Cascade's assessment):**
+Note: This analysis comes from a weaker model and should be verified.
+
+The likely sources of runtime dispatch in `transition_prob` are:
+
+1. **Rate function calls**: `first(rates)(model, data, i, t)` in `_accum_row` — if the tuple elements are generic `Function` rather than concrete callable types, each call dispatches at runtime. The earlier fix changed `rate_fns` from `Vector{Function}` to `Tuple`, but the tuple elements might still be inferred as generic `Function`.
+
+2. **Type instability propagation**: If `model` or `data` have any `Any`-typed fields (even after the NamedTuple fixes), reads from them return `Any`, causing instability to propagate through the rate functions.
+
+3. **`_state_index` dispatch**: This function likely does dictionary lookups or similar on the state space, which may not be type-stable.
+
+The dominant dispatch at `transition_prob` suggests the issue is in the rate function evaluation chain, not the `log(p + 1e-12)` itself — that's just where the instability manifests after the type-unstable `p` is computed.
+
+**Recommended next step:**
+Use `@code_warntype` on `transition_prob` with the actual badger model to see where inference breaks, then trace back to the source. Tools like `JET.jl` or `Cthulhu.jl` could also help diagnose the type instability.
+
+### 2026-07-17 — the actual root cause: `EpidemicData.trans_mat` was unparametrized
+
+Picked back up with a priority from Arthur: find and fix the runtime dispatch
+flagged above, comparing properly against the reference throughout.
+
+**Two real bugs found and fixed on the way, unrelated to type instability:**
+
+1. **`epidemic_loglik` ignored `sampling_period` entirely** — summed every
+   individual's transitions over the full `1:n_timepoints`, not that individual's
+   own sampling window, even though `iffbs.jl` already correctly restricts to it.
+   On the badger dataset the average window is 78 of 161 timepoints (48.4% of the
+   full range), so this was roughly 2x unnecessary work on every gradient call.
+   Fixed in `src/build.jl`'s `loglik`: now loops `first_t:min(last_t,
+   n_timepoints)-1` per individual, matching what the reference's own
+   `logPost_pars` does (`for j in mint_i:(lastObsAliveTimes[i]-1)`,
+   `posterior.jl:145`). `sampling_period` already defaults to `(1, n_timepoints)`
+   for every individual when the user doesn't supply one, so this costs nothing
+   when it isn't needed and is exact when it is.
+
+2. **`badger_data()` never passed `capt_effort` into `epidemic_data`'s extras** —
+   `examples/badger_data.jl` loads it into the raw struct (`d.capt_effort`,
+   from `CaptEffort.csv`) but `examples/badger_model.jl`'s `epidemic_data(...)`
+   call never forwarded it, even though `badger_fit.jl`'s `EtaKernel` reads
+   `data.capt_effort[g, t]`. This meant **the badger fit could not run past its
+   first `EtaKernel` conjugate update** — it always threw
+   `ArgumentError: EpidemicData has no field or extra 'capt_effort'`. This is
+   almost certainly why the earlier "2-sweep smoke test exceeded 600 s" never
+   produced output: it wasn't slow, it was crashing immediately and the
+   `timeout`/background-capture machinery swallowed the stack trace. Fixed with
+   one line in `badger_model.jl`'s `epidemic_data(...)` call.
+
+**Comparative benchmarking, done properly.** Built `badger_ref/bench_ref.jl` +
+`badger_ref/bench_mcmc_body.jl`: a verbatim copy of `MCMCiFFBS_`'s setup code
+(struct construction, survival refresh, group-level FOI log precompute — literally
+copy-pasted, not reimplemented) up to the point the real function starts its
+`for iter in 1:N` loop, then a small timing harness bolted on in place of the real
+loop body that times (a) one full iFFBS sweep over all 2384 individuals and (b)
+several `grad_pars` calls through the SAME cached `prepare_gradient` `prep` and
+`backend` the real HMC/NUTS step would use — reporting min/mean/median rather than
+a single sample. The reference's `Project.toml`/`Manifest.toml` were stale/empty
+(referenced packages like `Polyester`/`DifferentiationInterface`/`ForwardDiff`
+weren't even in the manifest) — deleted both and re-resolved a fresh environment
+from the actual `using`/`import` statements across every reference source file.
+
+Reference results (`bench_ref.jl forwarddiff`, `BENCH_REPEATS=2 BENCH_NGRAD=2`):
+
+```
+iFFBS sweep (2 sweeps):      min=5.326s  mean=7.582s  median=7.582s
+grad_pars (4 evals, 61 continuous params):
+                              min=0.099s  mean=0.846s  median=0.167s
+```
+
+Our gradient at that point (`grad_profile.jl`, `sampling_period` fix in place, 10
+evals): **min=1.493s mean=1.809s median=1.658s** — a genuine ~10-15x gap, too big
+to be explained by anything other than a real inefficiency, matching the
+`dispatch?=Y, gc?=Y` flags ProfileToLLM had already pinned to `loglik` at
+`build.jl:97` (`transition_prob` call) and `:99` (`log(p + 1e-12)`), accounting for
+87.3% of self time between them.
+
+**Root cause, found by reading the struct, not guessing at the call site.** Arthur
+asked directly: *what does the reference do differently in how it feeds data and
+functions to the likelihood?* The reference's rate functions
+(`groupLevelInfectionForce`, `siler_surv`, `progression_fn`, ...) are **free
+top-level functions** — `iFFBS_Data` never stores a function or a rate-function
+bundle as a field, only plain arrays/scalars. Every call site sees the function's
+own literal, concrete, singleton type at compile time; there is no struct-field
+indirection to erase it.
+
+Our design can't do that — `EpidemicData` genuinely has to hold the transition
+spec as *data*, because the package has no idea ahead of time what rate functions
+a user will supply (that's the whole point of `TransitionSpec{RF<:Tuple}`, whose
+own docstring already explains why `RF` is a type parameter: so
+`transition_matrix_at`'s tuple recursion sees one concrete function type per rate
+instead of dispatching through `Any`). The bug: `EpidemicData`'s struct
+declaration — `trans_mat::TransitionSpec` (src/data.jl:49, pre-fix) — dropped the
+`{RF}` parameter. A struct field's *declared* type is what the compiler uses to
+infer everything downstream of a field read, regardless of how carefully the
+*value* stored there is typed. So every `data.trans_mat.rate_fns` access (i.e.
+every single call inside `transition_prob`/`_accum_row`, the hottest site in the
+whole gradient) saw the abstract `TransitionSpec` — RF erased, tuple length and
+element types unknown — and fell through to runtime dispatch, exactly undoing the
+whole point of parametrizing `TransitionSpec` on `RF` one layer further out. The
+`_accum_row`/`_fill_rates!` tuple-recursion trick (see `transitions.jl`'s own
+docstrings) was never wrong; the container holding it was silently erasing the
+type information the recursion depends on before the recursion ever got a chance
+to specialize.
+
+Fix, `src/data.jl`:
+
+```julia
+struct EpidemicData{SS,OP,RC,EX<:NamedTuple,AG<:NamedTuple,RF<:Tuple}
+    ...
+    trans_mat::TransitionSpec{RF}
+    ...
+end
+```
+
+`RF` is inferred automatically from the `trans_mat` argument at construction —
+no change needed to `epidemic_data(...)`'s body, since it already passes a real
+`TransitionSpec{RF}` instance positionally into the default constructor.
+
+**Result — 100 tests still pass, and the gradient now matches the reference:**
+
+| | before | after `sampling_period` | after `TransitionSpec{RF}` | reference |
+|---|---|---|---|---|
+| gradient (61 params) | 3.63 s | 1.5–1.8 s | **0.125–0.136 s** | 0.099–0.167 s |
+| profile: dispatch?/gc? on `loglik` | Y/Y (87.3% self) | Y/Y | **all `-`** | — |
+
+The post-fix profile is dominated entirely by genuine floating-point arithmetic
+(`*`, `+`, `fma_llvm`, `getindex`) — no dispatch, no GC in the top rows — which is
+what a numerically-bound gradient is supposed to look like. Our median (0.134 s)
+now sits almost exactly on the reference's median (0.167 s); the reference's own
+`mean` (0.846s) is pulled up by one compilation-affected outlier in a 4-sample
+run, so the real comparison is the medians, and they match.
+
+**Revised 10,000-sweep feasibility.** At the new gradient cost, ~32 leapfrogs/sweep
+(tree depth 5) is ~4.3 s of NUTS gradient work; with iFFBS around 5–8 s/sweep
+(same ballpark as the reference's own 5.3–9.8 s), a full sweep is roughly
+**10–13 s**, putting 10,000 sweeps at **~30–35 hours (about a day and a half)** —
+down from the earlier ~330-hour estimate. Not yet attempted end-to-end (the
+`capt_effort` bug meant no full sweep had ever actually completed before this
+session), but the two blocking problems — a crash on the first conjugate update,
+and a ~12x-too-slow gradient — are both fixed now.
+
+**Not fixed, lower priority, noted for later:** `derived_summaries::Vector{Function}`
+(`src/data.jl`) has the identical unparametrized-field shape, but it's read only
+by the iFFBS/simulator/aggregate-update paths (`build.jl`'s `simulate`,
+`iffbs.jl`, `transitions.jl`'s `make_rest_contribution`) — never by
+`epidemic_loglik`, the NUTS gradient hot path this session was about. The
+reference's iFFBS sweep and ours are already in a similar ballpark (5-8s each),
+so this isn't blocking; fixing it would need the same kind of struct
+reparametrization (`EpidemicData{...,DS<:Tuple}`) and is a candidate for a
+follow-up pass if iFFBS timing becomes the bottleneck again.

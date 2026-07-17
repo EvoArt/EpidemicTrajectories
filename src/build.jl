@@ -69,6 +69,14 @@ PracticalBayes `@model`.
 Reads the aggregates rather than rebuilding them: whatever the rate functions read
 off `data` must already be consistent with `X`. That invariant is established once
 by [`apply_derived_summaries!`](@ref) and preserved by the latent sampler.
+
+Each individual's transitions are only summed over its own `sampling_period`
+(defaulting to `1:n_timepoints` when the user doesn't supply one — see
+[`epidemic_data`](@ref)), not the full time range. Outside that window there is no
+move to explain: nothing observes the individual, so the reference model (which
+this package matches) contributes no likelihood term there either. On the badger
+dataset the average window is under half the full 161 timepoints, so this roughly
+halves the per-gradient cost.
 """
 function epidemic_loglik(data::EpidemicData)
     function loglik(model, data::EpidemicData, X)
@@ -79,8 +87,9 @@ function epidemic_loglik(data::EpidemicData)
             ll += log(p0[X[1, i]] + 1e-12)
         end
 
-        for t in 1:(data.n_timepoints - 1)
-            for i in 1:data.n_individuals
+        for i in 1:data.n_individuals
+            first_t, last_t = data.sampling_period[i]
+            for t in first_t:min(last_t, data.n_timepoints) - 1
                 # Only ONE entry of the transition matrix matters here: the move
                 # this individual actually made. `transition_prob` computes just
                 # that, rather than building the whole matrix per (i, t) — which

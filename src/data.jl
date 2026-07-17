@@ -38,7 +38,7 @@ NamedTuple the element type is known, and the same code allocates nothing. It co
 the user nothing: they still put whatever they like in, and the package still never
 looks inside.
 """
-struct EpidemicData{SS,OP,RC,EX<:NamedTuple,AG<:NamedTuple}
+struct EpidemicData{SS,OP,RC,EX<:NamedTuple,AG<:NamedTuple,RF<:Tuple}
     n_individuals::Int
     n_timepoints::Int
     n_states::Int
@@ -46,7 +46,7 @@ struct EpidemicData{SS,OP,RC,EX<:NamedTuple,AG<:NamedTuple}
     group::Vector{Int}
     members_by_group::Dict{Int,Vector{Int}}
     sampling_period::Vector{Tuple{Int,Int}}
-    trans_mat::TransitionSpec
+    trans_mat::TransitionSpec{RF}
     starting_state::SS
     observation_process::OP
     derived_summaries::Vector{Function}

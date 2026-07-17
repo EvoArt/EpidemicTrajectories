@@ -223,8 +223,7 @@ the cached quantity means. Log any measurement here when it is attempted.
   see the log entry below.
 - ~~**Per-individual sampling windows.**~~ **CONFIRMED and FIXED** — below.
 - ~~**Time-varying group membership.**~~ **PARTLY WRONG, and FIXED** — below.
-- **`@survival` is a stub.** Parsed but returns `nothing`; needs implementing.
-  Still outstanding.
+- ~~**`@survival` is a stub.**~~ **CONFIRMED and FIXED** — below.
 
 ---
 
@@ -288,3 +287,24 @@ assumption about what a model observes, and it is now gone.
 Verified: cattle user code still recovers all six parameters (numerically identical
 to before, since the model is unchanged — only who supplies the observation process
 moved). Test suite 76 → 84, the new tests covering the three fixes.
+
+### 2026-07-17 — `@survival` implemented
+
+The fourth anticipated change, confirmed. Two real bugs, both of which the badger
+model would have hit immediately:
+
+1. **`death=:D` never worked.** The parser read `kw.args[2]` straight into a
+   `Tuple{Symbol,Symbol,Any}`, but `death=:D` gives a `QuoteNode(:D)`, not a
+   `Symbol` — so any use of `@survival` died with `Cannot convert QuoteNode to
+   Symbol`. It had never been exercised. Now unwrapped, and `death=D` works too.
+2. **Absorbing states got no death transition.** The leftover-mass loop collected
+   live states from the transitions' *sources* only, so `I` — which in an S→E→I→D
+   model only ever appears as a destination — never got its `I -> D`. Badgers in
+   the infectious state would have been immortal. Now collects live states from
+   both sides of every transition.
+
+So `@transitions [:S,:E,:I,:D] begin; @survival siler death=:D; S -> E = foi;
+E -> I = prog; end` yields (S,E), (E,I), (S,D), (E,D), (I,D) — the badger
+structure, with the two death transitions the user never wrote. 84 → 92 tests.
+
+All four anticipated package changes are now done. Next: the badger model itself.

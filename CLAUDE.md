@@ -159,6 +159,39 @@ names is a default the user can replace, never a constraint.
   preserved thereafter by iFFBS's reverse→refilter→reapply. `loglik` and the rate
   functions READ the aggregates and never rebuild them.
 
+## Performance: what matters, in order
+
+Measured on the badger model (2384 individuals x 161 timepoints), which is the
+package's stress case. 1000 iFFBS sweeps went from **78 hours to 1.4 hours** via
+two changes, neither of which was the one that looked obvious:
+
+1. **Concrete types.** `extras`/`aggregates` are `NamedTuple`s (not `Dict{Symbol,Any}`),
+   `EpidemicData` is parameterised on them, `getproperty` dispatches on `Val(s)`
+   (not `s in fieldnames(T)`, a runtime search that allocates on every access), and
+   `rate_fns` is a `Tuple` (not `Vector{Function}`) iterated by recursion in
+   `_fill_rates!`. Any of these regressing costs ~5x and is invisible to inference
+   checks — `data.age` reports `Matrix{Int64}` either way. **Benchmark, don't infer.**
+2. **`coupled_transitions`.** The user declares which of a neighbour's transitions
+   the focal can influence; the sampler skips neighbours whose realised move it
+   cannot affect. Exact (verified to 1e-13), and worth ~10x on the badger model.
+
+**The trap in `coupled_transitions`**: the mask must be the CLOSURE — every
+transition out of any coupled source state, not just the named one. Probabilities
+out of a state sum to one, so influencing `S -> E` necessarily influences `S -> S`.
+Masking only the named transition changes the sampler's weights by ~0.25. There are
+tests for both properties; do not "simplify" them away.
+
+Future work, roughly in order of expected value:
+- **Infer the coupled set** from the transition spec rather than having the user
+  declare it: the package can in principle see which rate functions touch the
+  aggregates. User-declared works and is explicit, so this is convenience.
+- Memoise the coupling per MCMC iteration (the reference's `logProbRest` cache),
+  clearing each sweep. Not currently needed — the two fixes above made it moot for
+  the badger model.
+- Profile with `ProfileToLLM` (`~/.julia/dev/ProfileToLLM`) rather than guessing;
+  it flags runtime dispatch and GC per line, which is how both wins above were
+  found. Guessing had pointed at the coupling, which was not the problem.
+
 ## Known gaps in the current walkthrough design
 
 - `@survival` is parsed but is currently a stub returning `nothing`.

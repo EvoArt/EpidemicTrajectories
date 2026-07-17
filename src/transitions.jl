@@ -37,9 +37,25 @@ function transition_matrix_at(trans_mat::TransitionSpec, model, data::EpidemicDa
     P
 end
 
-# The working number type: whatever the parameters are. Under AD this is the
-# backend's dual/tracked type, so the transition matrix follows automatically.
-_param_eltype(model) = promote_type(map(typeof, Tuple(values(model)))...)
+# The working number type: whatever number type the parameters are made of. Under
+# AD this is the backend's dual/tracked type, so the transition matrix follows
+# automatically and gradients flow.
+#
+# A parameter set mixes scalars and containers — `(; beta=0.1, alpha=[...])` — so
+# this reaches through arrays to the numbers inside rather than promoting the
+# container types (which would land on `Any`, and `zeros(Any, ...)` fails).
+# Non-numeric entries are ignored: a model may carry an integer index or a flag
+# that has nothing to do with the working precision.
+_number_type(x::Number) = typeof(x)
+_number_type(x::AbstractArray) = eltype(x)
+_number_type(::Any) = Union{}
+
+function _param_eltype(model)
+    T = mapreduce(_number_type, promote_type, Tuple(values(model)); init=Union{})
+    # `Union{}` means nothing numeric was found; `Bool` promotes badly for
+    # arithmetic. Fall back to Float64 in both cases.
+    return (T === Union{} || T === Bool) ? Float64 : T
+end
 
 @inline function _sample_categorical(rng, probs)
     u = rand(rng)

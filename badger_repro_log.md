@@ -557,3 +557,43 @@ Zero allocations in both. This is the whole 1.07 GiB per likelihood call.
 Implementing now: `extras` and `aggregates` become NamedTuples, `EpidemicData`
 gains type parameters for them, `getproperty` dispatches on `Val`, and `rate_fns`
 becomes a `Tuple`. The user-facing API does not change.
+
+### 2026-07-17 — types fixed: 5.3x, and the coupling was never touched
+
+Implemented the three type fixes and measured after each.
+
+| | before | after | gain |
+|---|---|---|---|
+| one `loglik` | 3.02 s | **0.64 s** | 4.7x |
+| one iFFBS individual | 0.118 s | **0.022 s** | 5.4x |
+| one full sweep (2384) | 4.7 min | **0.9 min** | 5.2x |
+| 1000 sweeps | 78 h | **14.7 h** | 5.3x |
+
+What changed:
+
+1. **`extras`/`aggregates`: `Dict{Symbol,Any}` → `NamedTuple`**, and `EpidemicData`
+   parameterised on their types. Gave ~2x on its own, and `siler_survival`
+   **disappeared from the profile entirely** — it had been ~45% of self time purely
+   from `Any`-typed arithmetic.
+2. **`getproperty` dispatches on `Val(s)`** rather than `s in fieldnames(T)` (a
+   runtime search that allocates on every access).
+3. **`rate_fns`: `Vector{Function}` → `Tuple`**, with `TransitionSpec` parameterised
+   on it, and `transition_matrix_at` recursing over the tuple via `_fill_rates!`
+   instead of looping. This was the remaining 75% of self time: a plain loop over a
+   heterogeneous tuple still infers `Any` per element, so each rate call
+   dispatched. Recursion specialises on one concrete function type at a time. Gave
+   the second ~2.6x.
+
+The profile is now clean: no `siler_survival`, no dispatch-flagged rows at the top,
+and the remaining leaves are ordinary arithmetic (`muladd`, `getindex`, `float.jl`)
+— what healthy code looks like.
+
+**The point worth keeping**: none of this touched the coupling. My plan before
+profiling was to build the `logProbRest` cache first; that would have left a 5x
+type tax underneath it and I would have concluded the coupling was the problem.
+The profiler said otherwise, and it was right.
+
+14.7 h for 1000 sweeps is still not a casual run, but it is now in reach for an
+overnight fit, and the coupling cache/memoisation remains available if more is
+needed. Correctness first: the cattle model still recovers 6/6 and all 92 tests
+pass after the change.

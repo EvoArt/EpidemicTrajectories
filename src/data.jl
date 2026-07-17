@@ -28,8 +28,17 @@ Fields:
 - `extras` — anything else the user's own functions need (covariates, test
   matrices, capture histories, ...). The package never looks inside.
 - `aggregates` — the user's arrays. The package attaches no meaning to these.
+
+`extras` and `aggregates` are `NamedTuple`s, and `EpidemicData` is parameterised
+on their types. This matters for speed rather than style: a rate function reads
+`data.age[i, t]` on every one of millions of evaluations, and a `Dict{Symbol,Any}`
+would return `Any` — so the arithmetic on top of it would dispatch at runtime and
+box, which measured ~18x slower with ~500k allocations per 20k evaluations. With a
+NamedTuple the element type is known, and the same code allocates nothing. It costs
+the user nothing: they still put whatever they like in, and the package still never
+looks inside.
 """
-mutable struct EpidemicData
+struct EpidemicData{SS,OP,RC,EX<:NamedTuple,AG<:NamedTuple}
     n_individuals::Int
     n_timepoints::Int
     n_states::Int
@@ -38,25 +47,44 @@ mutable struct EpidemicData
     members_by_group::Dict{Int,Vector{Int}}
     sampling_period::Vector{Tuple{Int,Int}}
     trans_mat::TransitionSpec
-    starting_state::Function
-    observation_process::Function
+    starting_state::SS
+    observation_process::OP
     derived_summaries::Vector{Function}
-    rest_contribution::Function
+    rest_contribution::RC
     affected_individuals::Union{Nothing,Matrix{Vector{Int}}}
-    extras::Dict{Symbol,Any}
-    aggregates::Dict{Symbol,Any}
+    extras::EX
+    aggregates::AG
 end
 
 # `data.whatever` reaches into `extras`, so a user's own functions can read their
 # covariates/test matrices/capture histories off `data` by name, without the
 # package knowing any of them exist.
-function Base.getproperty(d::EpidemicData, s::Symbol)
-    s in fieldnames(EpidemicData) && return getfield(d, s)
-    extras = getfield(d, :extras)
-    haskey(extras, s) && return extras[s]
-    throw(ArgumentError("EpidemicData has no field or extra `$s`"))
+#
+# The `Val(s)` dispatch is not decoration. The obvious spelling —
+# `s in fieldnames(EpidemicData) ? getfield(d, s) : ...` — is a runtime search over
+# a tuple of symbols on EVERY property access, and it allocates: measured 620x
+# slower than this version (11.7 ms / 20k allocations vs 18.9 µs / 0) on nothing
+# but repeated `data.age[i, t]`. Dispatching on `Val` decides the branch at compile
+# time, so the whole accessor disappears.
+#
+# Note that inference alone does not catch this: both spellings report
+# `data.age::Matrix{Int64}`. Only benchmarking does.
+@inline Base.getproperty(d::EpidemicData, s::Symbol) = _getfield_or_extra(d, Val(s))
+
+# One method per real field, so each resolves at compile time...
+for f in fieldnames(EpidemicData)
+    @eval @inline _getfield_or_extra(d::EpidemicData, ::Val{$(QuoteNode(f))}) = getfield(d, $(QuoteNode(f)))
 end
-Base.propertynames(d::EpidemicData) = (fieldnames(EpidemicData)..., keys(getfield(d, :extras))...)
+# ...and anything else is an extra.
+@inline function _getfield_or_extra(d::EpidemicData, ::Val{s}) where {s}
+    extras = getfield(d, :extras)
+    hasproperty(extras, s) ||
+        throw(ArgumentError("EpidemicData has no field or extra `$s`; " *
+                            "pass it to `epidemic_data` as `$s = ...`"))
+    return getproperty(extras, s)
+end
+
+Base.propertynames(d::EpidemicData) = (fieldnames(EpidemicData)..., propertynames(getfield(d, :extras))...)
 
 """
     no_observations(model, data, X, i, t)
@@ -209,7 +237,7 @@ function epidemic_data(; n_individuals, n_timepoints, trans_mat,
         Vector{Function}(collect(derived_summaries)),
         rest_contribution,
         affected_individuals,
-        Dict{Symbol,Any}(pairs(extras)),
-        Dict{Symbol,Any}(aggregates),
+        NamedTuple(extras),
+        aggregates isa NamedTuple ? aggregates : NamedTuple(aggregates),
     )
 end

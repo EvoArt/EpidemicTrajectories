@@ -10,37 +10,6 @@
 # what makes the statistics the focal individual sees leave-one-out (excluding
 # itself) without any special-casing.
 
-"""
-    observation_process(model, data, X, i, t) -> Vector
-
-The per-state likelihood of individual `i`'s observations at time `t` — the
-"corrector" the filter multiplies into its predicted state probabilities.
-
-The default reads `data.test_mats` under the convention that a negative entry
-means "not observed" (contributing no information) and interprets the model's
-`θʳ`/`θᶠ` as test sensitivities against a perfectly specific test. Replace it for
-a different observation model.
-"""
-function observation_process(model, data::EpidemicData, X, i, t)
-    w = ones(Float64, data.n_states)
-    y_r = data.test_mats[1][t, i]
-    y_f = data.test_mats[2][t, i]
-
-    if y_r >= 0
-        θ = model.θʳ
-        w[1] *= y_r == 1 ? 0.0 : 1.0
-        w[2] *= y_r == 1 ? θ : (1 - θ)
-    end
-
-    if y_f >= 0
-        θ = model.θᶠ
-        w[1] *= y_f == 1 ? 0.0 : 1.0
-        w[2] *= y_f == 1 ? θ : (1 - θ)
-    end
-
-    w
-end
-
 initialise_forward_filter(model, data::EpidemicData, X, i, t) = data.starting_state(model, data, X, i, t)
 
 """
@@ -57,7 +26,7 @@ function forward_filter(xᵢ, start_sampling, end_sampling, model, data::Epidemi
 
     t0 = start_sampling
     base = initialise_forward_filter(model, data, X, i, t0)
-    obs = observation_process(model, data, X, i, t0)
+    obs = data.observation_process(model, data, X, i, t0)
     affected = data.affected_individuals === nothing ? nothing : data.affected_individuals[t0, i]
     rest = data.rest_contribution(model, data, X, i, t0, data.n_states, affected)
     init = base .* obs .* rest
@@ -70,7 +39,7 @@ function forward_filter(xᵢ, start_sampling, end_sampling, model, data::Epidemi
         trans = transition_matrix_at(data.trans_mat, model, data, X, i, tp)
         trans_cache[j] = trans
         pred = trans' * view(probs, j - 1, :)
-        obs_w = observation_process(model, data, X, i, t)
+        obs_w = data.observation_process(model, data, X, i, t)
         affected = data.affected_individuals === nothing ? nothing : data.affected_individuals[t, i]
         rest_w = data.rest_contribution(model, data, X, i, t, data.n_states, affected)
         unnorm = pred .* obs_w .* rest_w

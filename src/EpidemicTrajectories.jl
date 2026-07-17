@@ -45,13 +45,14 @@ export reset_aggregates!, apply_derived_summaries!
 
 # The data container
 export EpidemicData, epidemic_data, members, build_affected_individuals_from_groups
+export no_observations
 
 # Transition matrices and the coupling term
 export transition_matrix_at, make_rest_contribution, no_rest_contribution
 export make_neighbor_logprob_from_transitions
 
 # The latent sampler
-export iffbs!, iffbs_individual!, forward_filter, backward_sample!, observation_process
+export iffbs!, iffbs_individual!, forward_filter, backward_sample!
 
 # What a model spec generates
 export epidemic_simulator, epidemic_loglik, epidemic_latent_sampler

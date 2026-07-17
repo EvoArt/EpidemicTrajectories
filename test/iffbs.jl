@@ -6,7 +6,18 @@
 #  * the incrementally-maintained aggregate stays exactly equal to a from-scratch
 #    recompute (the property the reversible update exists to provide).
 
-function _si_setup(; n_groups=4, n_per_group=6, n_t=40)
+# A perfect test, observed on the days where `results` is not negative. Supplied
+# by the caller as the model's own observation process — the package has no
+# built-in notion of what is observed.
+function _perfect_test(model, data, X, i, t)
+    w = ones(Float64, data.n_states)
+    y = data.results[t, i]
+    y < 0 && return w                       # not tested: no information
+    w[y == 1 ? 1 : 2] = 0.0                 # positive rules out S; negative rules out I
+    w
+end
+
+function _si_setup(; n_groups=4, n_per_group=6, n_t=40, results=nothing)
     n_ind = n_groups * n_per_group
     group = repeat(1:n_groups; inner=n_per_group)
     state_space = [:S, :I]
@@ -26,12 +37,12 @@ function _si_setup(; n_groups=4, n_per_group=6, n_t=40)
     end
 
     starting_state = (model, data, X, i, t) -> [1 - model.ν, model.ν]
-    no_tests = [fill(-1, n_t, n_ind), fill(-1, n_t, n_ind)]
 
-    data = epidemic_data(
+    kw = results === nothing ? (;) :
+         (; observation_process=_perfect_test, results=results)
+    data = epidemic_data(;
         n_individuals=n_ind, n_timepoints=n_t, group=group,
-        trans_mat=spec, starting_state=starting_state,
-        test_mats=no_tests, aggregates=aggs,
+        trans_mat=spec, starting_state=starting_state, aggregates=aggs, kw...,
     )
     (; data, n_ind, n_t, n_groups)
 end
@@ -77,18 +88,18 @@ end
 end
 
 @testset "iFFBS: reconstructs the trajectory from a wrong starting X" begin
-    s = _si_setup()
     pars = (; α=0.05, β=0.08, m=5.0, ν=0.15, θʳ=0.9, θᶠ=0.9)
-    X_true = epidemic_simulator(s.data)(StableRNG(3), pars)
 
-    # observe a perfectly sensitive, perfectly specific test on some days, so the
-    # sampler has real information to reconstruct from
-    R = fill(-1, s.n_t, s.n_ind)
-    for t in 1:4:s.n_t, i in 1:s.n_ind
+    # simulate a truth, then observe a perfect test on some days so the sampler
+    # has real information to reconstruct from
+    sim = _si_setup()
+    X_true = epidemic_simulator(sim.data)(StableRNG(3), pars)
+    R = fill(-1, sim.n_t, sim.n_ind)
+    for t in 1:4:sim.n_t, i in 1:sim.n_ind
         R[t, i] = X_true[t, i] == 2 ? 1 : 0
     end
-    s.data.test_mats[1] .= R
 
+    s = _si_setup(results=R)
     X = fill(1, s.n_t, s.n_ind)         # everyone susceptible: wrong on purpose
     reset_aggregates!(s.data)
     apply_derived_summaries!(pars, s.data, X)
@@ -104,6 +115,44 @@ end
     @test mean(X .== 2) > 0.05
     pos = findall(R .== 1)
     @test all(X[pos] .== 2)
+end
+
+@testset "epidemic_data: user-supplied structure" begin
+    # sampling_period, affected_individuals and the observation process are the
+    # user's to decide; the package only supplies defaults.
+    spec = @transitions [:S, :I] begin
+        S -> I = 0.1
+        I -> S = 0.2
+    end
+    aggs = @aggregate [:S, :I] begin
+        @array a Int (1, 3)
+        a[1, t] += (state == :I)
+    end
+    common = (; n_individuals=2, n_timepoints=3, trans_mat=spec,
+              starting_state=(model, data, X, i, t) -> [0.9, 0.1], aggregates=aggs)
+
+    # defaults: whole window for everyone, no observations
+    d = epidemic_data(; common...)
+    @test d.sampling_period == [(1, 3), (1, 3)]
+    @test d.observation_process === no_observations
+
+    # user-supplied per-individual windows
+    d2 = epidemic_data(; common..., sampling_period=[(1, 2), (2, 3)])
+    @test d2.sampling_period == [(1, 2), (2, 3)]
+    @test_throws ArgumentError epidemic_data(; common..., sampling_period=[(1, 2)])
+
+    # user-supplied coupling structure, indexed [t, i] so it may vary over time
+    af = [Int[] for t in 1:3, i in 1:2]
+    af[1, 1] = [2]                       # who individual 1 affects at t=1
+    d3 = epidemic_data(; common..., affected_individuals=af)
+    @test d3.affected_individuals[1, 1] == [2]
+    @test_throws ArgumentError epidemic_data(; common...,
+                                             affected_individuals=[Int[] for t in 1:2, i in 1:2])
+
+    # extras are reachable by name, and the package never inspects them
+    d4 = epidemic_data(; common..., my_covariate=[1.5, 2.5])
+    @test d4.my_covariate == [1.5, 2.5]
+    @test_throws ArgumentError d4.not_a_thing
 end
 
 @testset "iFFBS: the incremental aggregate equals a from-scratch recompute" begin
@@ -149,7 +198,6 @@ end
         n_individuals=n_ind, n_timepoints=n_t, group=group,
         trans_mat=spec,
         starting_state=(model, data, X, i, t) -> [0.9, 0.1],
-        test_mats=[fill(-1, n_t, n_ind), fill(-1, n_t, n_ind)],
         aggregates=Dict{Symbol,Any}(:mine => zeros(Int, 2, n_t)),
         derived_summaries=[hand_written],
     )
@@ -173,7 +221,7 @@ end
     end
     common = (; n_individuals=2, n_timepoints=3, group=[1, 1], trans_mat=spec,
               starting_state=(model, data, X, i, t) -> [0.9, 0.1],
-              test_mats=[fill(-1, 3, 2), fill(-1, 3, 2)])
+              )
 
     # an @aggregate declaration already carries its updates
     @test_throws ErrorException epidemic_data(; common..., aggregates=aggs,

@@ -195,6 +195,12 @@ function badger_data(dir; brock_changepoint=BROCK_CHANGEPOINT)
         aggregates=badger_aggregates(d.n_groups, d.n_timepoints),
         sampling_period=d.sampling_period,
         affected_individuals=affected,
+        # The ONLY way one badger affects another is by contributing to its force
+        # of infection, which only the S -> E rate reads. A neighbour that died,
+        # progressed, or stayed put would have done so regardless of the focal's
+        # state, so the sampler can skip it exactly rather than rebuild its whole
+        # transition matrix once per candidate state.
+        coupled_transitions=[(:S, :E)],
         state_space=BADGER_STATES,
         # my own data, reachable as data.name in the functions above
         social_group=d.social_group,

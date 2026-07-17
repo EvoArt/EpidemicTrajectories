@@ -107,6 +107,54 @@ function make_neighbor_logprob_from_transitions(trans_mat::TransitionSpec; eps_p
 end
 
 """
+    coupled_transition_mask(state_space, coupled_transitions) -> Matrix{Bool}
+
+Which of a neighbour's moves the focal individual can influence, as an
+`n_states × n_states` mask over `(from, to)` pairs.
+
+`coupled_transitions` names the transitions whose RATE depends on the focal — e.g.
+`[(:S, :E)]` for a model where the only effect one individual has on another is
+contributing to its force of infection. Names or indices both work.
+
+The mask returned is **wider than what you pass**: it marks every transition out of
+any state that has a coupled transition out of it. That is not a safety margin, it
+is required. Probabilities out of a state sum to one, so if the focal raises a
+neighbour's `S -> E`, it necessarily lowers that neighbour's `S -> S` (and any
+other `S -> *`) by the same amount. Those moves are coupled too, even though their
+own rate functions never look at the focal. Verified empirically: a neighbour's
+`S -> S` log-probability really does move with the focal's state, and masking it
+out changes the sampler's weights by up to 0.25.
+
+So declaring `[(:S, :E)]` in the badger model buys the skip only for neighbours
+currently in `E`, `I` or `D` — every `S -> *` move stays in. That is still most of
+the population once mortality bites, and it is exact.
+
+The saving is exact, not an approximation: a neighbour whose realised move is
+outside the mask has the same probability whatever the focal does, so it
+contributes an identical constant to every candidate and cancels when the weights
+are normalised.
+"""
+function coupled_transition_mask(state_space, coupled_transitions)
+    n = length(state_space)
+    idx(s::Integer) = Int(s)
+    function idx(s::Symbol)
+        k = findfirst(==(s), state_space)
+        k === nothing && error("State :$s is not in the state space $(collect(state_space))")
+        k
+    end
+
+    # Any state with a coupled transition out of it has ALL of its outgoing
+    # transitions coupled: the rates out of a state must sum to one, so changing
+    # one changes the others. Missing this makes the mask silently wrong.
+    coupled_sources = Set{Int}(idx(from) for (from, _) in coupled_transitions)
+    mask = falses(n, n)
+    for a in coupled_sources, b in 1:n
+        mask[a, b] = true
+    end
+    return Matrix(mask)
+end
+
+"""
     make_rest_contribution(; affected_ids, neighbor_logprob, normalize=true,
                              min_logprob=-1e12)
 
@@ -127,7 +175,8 @@ must be reversible.
 - `neighbor_logprob`: `(model, data, X, j, t, updated_id) -> log-probability of j's
   realized move` — see [`make_neighbor_logprob_from_transitions`](@ref).
 """
-function make_rest_contribution(; normalize=true, min_logprob=-1e12, affected_ids, neighbor_logprob)
+function make_rest_contribution(; normalize=true, min_logprob=-1e12, affected_ids,
+                                  neighbor_logprob, coupled_mask=nothing)
     function rest_contribution(model, data::EpidemicData, X, i, t, n_states, affected_override=nothing)
         # At the final timepoint there is no t -> t+1 move to be informative about.
         t == data.n_timepoints && return ones(n_states)
@@ -144,6 +193,14 @@ function make_rest_contribution(; normalize=true, min_logprob=-1e12, affected_id
 
             acc = 0.0
             for j in ids
+                # A neighbour whose realised move is not one the focal can
+                # influence has the same probability under every candidate state,
+                # so it contributes an identical constant that cancels on
+                # normalisation. Skipping it is exact, not an approximation — and
+                # it saves building that neighbour's whole transition matrix.
+                if coupled_mask !== nothing
+                    @inbounds coupled_mask[X[t, j], X[t + 1, j]] || continue
+                end
                 acc += max(neighbor_logprob(model, data, X, j, t, i), min_logprob)
             end
 

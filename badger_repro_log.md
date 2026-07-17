@@ -219,14 +219,12 @@ the cached quantity means. Log any measurement here when it is attempted.
 
 ### Anticipated package changes (to confirm or refute as I go)
 
-- **The observation process must be user-supplied.** Currently hard-coded in
-  `src/iffbs.jl` for the cattle model's two tests. This is a genuine design flaw
-  by the package's own rule — it assumes an observation model.
-- **Per-individual sampling windows.** `epidemic_data` currently sets
-  `sampling_period = [(1, n_timepoints) ...]` for everyone.
-- **Time-varying group membership.** `affected_individuals` is built once from a
-  fixed `group` vector; the badger model needs `SocGroup[i, t]`.
+- ~~**The observation process must be user-supplied.**~~ **CONFIRMED and FIXED** —
+  see the log entry below.
+- ~~**Per-individual sampling windows.**~~ **CONFIRMED and FIXED** — below.
+- ~~**Time-varying group membership.**~~ **PARTLY WRONG, and FIXED** — below.
 - **`@survival` is a stub.** Parsed but returns `nothing`; needs implementing.
+  Still outstanding.
 
 ---
 
@@ -241,3 +239,52 @@ StatPak`). The reference infers the changepoint between them. Fixing it at
 `t = 101` is therefore a static column relabelling — see "Deviation" above.
 
 No package changes yet.
+
+### 2026-07-17 — three package changes, made before touching the badger model
+
+Arthur reviewed the four anticipated changes and pushed back on them. He was right
+on every count, and the outcome is three fixes to the package plus one correction
+to my own claim. All three were the *same* flaw wearing different hats: **the
+package deciding something the user should decide, with no way to override.**
+
+**1. The observation process WAS hard-coded (my error).** `src/iffbs.jl` carried a
+cattle-specific `observation_process` — two tests, sensitivity only, reading
+`model.θʳ`/`model.θᶠ` by name — and `forward_filter` called it unqualified, so a
+user's own definition could never be reached. This was not in the walkthrough's
+design: there it lived in the *package-code* section of a single-file script, where
+a user could simply redefine it. Porting it verbatim into a real package silently
+promoted a placeholder into a hard assumption — the same class of mistake as the
+old `epidemic_model` API, and a direct violation of the rule in CLAUDE.md.
+
+Fixed: `observation_process` is now a user-supplied field on `EpidemicData`,
+defaulting to `no_observations` (every state equally likely — the honest default,
+since the package cannot know what you observe). The cattle model now supplies its
+own, as user code, which is where it always belonged.
+
+**2. Per-individual sampling windows WERE hard-coded.** `epidemic_data` set
+`sampling_period = [(1, n_timepoints) ...]` unconditionally. `walkthrough.jl` had
+them as user-supplied, so this was a regression I introduced in the port. Fixed:
+`sampling_period` is a keyword, defaulting to the whole window for everyone, and
+validated against `n_individuals`.
+
+**3. Time-varying group membership — I was wrong to call this a package change.**
+Arthur said he'd be unhappy if the design blocked it. It didn't: `affected_individuals`
+is already a `Matrix{Vector{Int}}` indexed `[t, i]`, so time-varying coupling was
+designed for from the start. What was wrong was narrower — `epidemic_data`
+*unconditionally overwrote* it by calling `build_affected_individuals_from_groups`
+on a fixed `group::Vector{Int}`, giving no way to pass your own. The core was fine;
+the constructor was the problem. Fixed: `affected_individuals` is a keyword
+(validated for shape), with the fixed-group build as a convenience default, and
+`group` itself now defaults to "everyone in one group" for models that have no
+groups at all.
+
+**Also added: `extras`.** The badger model needs to carry capture histories, test
+matrices, ages, and time-varying group membership on `data`. Rather than the
+package naming any of them, `epidemic_data(...; anything=...)` stores them and
+`data.anything` reaches them via `getproperty`. The package never looks inside.
+This is what `test_mats` should have been all along — it was another package-level
+assumption about what a model observes, and it is now gone.
+
+Verified: cattle user code still recovers all six parameters (numerically identical
+to before, since the model is unchanged — only who supplies the observation process
+moved). Test suite 76 → 84, the new tests covering the three fixes.

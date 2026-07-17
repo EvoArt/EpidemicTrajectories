@@ -115,12 +115,22 @@ Three distinct things — keep them straight:
 - `model` — the model **parameters** (a NamedTuple such as `(; α, β, m, ν, θʳ, θᶠ)`).
 - `X` — the **latent state trajectory**, a `Matrix{Int}` indexed `X[t, i]`
   (time × individual), holding 1-based state indices into `state_space`.
-- `data` — everything else: the observations the PPL is conditioned on, the fixed
-  structure (group membership, sampling periods, transition spec), the user's
-  `derived_summaries`, and the user's `aggregates` container.
+- `data` — everything else: the fixed structure (sampling periods, coupling
+  structure, transition spec), the user's `derived_summaries`, the user's
+  `aggregates` container, and the user's own `extras` (observations, covariates,
+  anything) reachable as `data.name`.
 
 Rate functions take `(model, data, i, t)`; derived summaries take
-`(model, data, X, s, i, t; reverse=false)`.
+`(model, data, X, s, i, t; reverse=false)`; the observation process takes
+`(model, data, X, i, t)` and returns a per-state weight vector.
+
+**The same rule applies to all of these, not just the aggregates.** The package
+supplies no observation process (the default is `no_observations` — the honest
+default, since it cannot know what you observe), assumes no group structure
+(`affected_individuals` is indexed `[t, i]`, so coupling may vary over time; the
+fixed-group build is only a convenience default), and assumes no sampling window
+(defaults to `1:T` for everyone, overridable per individual). Anything the package
+names is a default the user can replace, never a constraint.
 
 ## Non-obvious facts
 

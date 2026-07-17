@@ -55,20 +55,34 @@ end
 
 starting_state = (model, data, X, i, t) -> [1 - model.ν, model.ν]
 
+# What I observe, and how it relates to the states: two imperfect tests, each with
+# its own sensitivity and perfect specificity. A negative entry means the animal
+# wasn't tested that day, so the result says nothing. The package knows none of
+# this — it just multiplies these weights into the filter.
+function cattle_observations(model, data, X, i, t)
+    w = ones(Float64, data.n_states)
+    for (results, θ) in ((data.rams, model.θʳ), (data.faecal, model.θᶠ))
+        y = results[t, i]
+        y < 0 && continue                       # not tested
+        w[1] *= y == 1 ? 0.0 : 1.0              # susceptible: never tests positive
+        w[2] *= y == 1 ? θ : (1 - θ)            # infected: positive with prob θ
+    end
+    w
+end
+
 ## ---------------------------------------------------------------------------
 ## Simulate data from known parameters
 ## ---------------------------------------------------------------------------
 
 true_pars = (; α=0.01, β=0.02, m=6.0, ν=0.10, θʳ=0.8, θᶠ=0.5)
 
-no_tests = [fill(-1, n_timepoints, n_individuals), fill(-1, n_timepoints, n_individuals)]
+# Simulating needs no observation process at all — there is nothing to condition on.
 sim_data = epidemic_data(
     n_individuals=n_individuals,
     n_timepoints=n_timepoints,
     group=group,
     trans_mat=trans_mat,
     starting_state=starting_state,
-    test_mats=no_tests,
     aggregates=aggs,
 )
 
@@ -100,8 +114,11 @@ fit_data = epidemic_data(
     group=group,
     trans_mat=trans_mat,
     starting_state=starting_state,
-    test_mats=[Rmask, Fmask],
+    observation_process=cattle_observations,
     aggregates=aggs,
+    # my own data, reachable as data.rams / data.faecal in the functions above
+    rams=Rmask,
+    faecal=Fmask,
 )
 
 loglik = epidemic_loglik(fit_data)

@@ -1314,3 +1314,88 @@ package-side structural change, materially bigger than `coupling_trans_mat`
 (one keyword) — needs sign-off before starting, and needs its own invalidation
 correctness worked out generically from `affected_individuals`/`coupled_transitions`
 (both already user-declared) rather than assumed.
+
+### 2026-07-17 (cont.) — the gap closed, as power-user code: `rest_contribution` keyword
+
+The previous entry ended proposing a package-side running-total cache and flagging
+it as "materially bigger than coupling_trans_mat, needs sign-off." It turned out
+NOT to need a package-structural change at all — the same seam that worked for the
+FOI cache works here: expose the coupling term itself as a keyword.
+
+**The seam (`src/data.jl`).** `rest_contribution` was already a per-instance field
+(`RC` type parameter) and already the ONLY route `forward_filter` uses to reach the
+coupling; `epidemic_data` simply always built it via `make_rest_contribution(...)`
+and never let the caller override. Added `rest_contribution=nothing` keyword,
+defaulting to the brute-force builder. One keyword, one branch. A power user can
+now supply their own coupling term of the same signature
+`(model, data, X, i, t, n_states, affected_override=nothing) -> weight vector`,
+exploiting their model's structure to skip the default's
+`O(n_states × |affected|)` neighbour loop. Documented with the contract (must be
+side-effect-free, return per-candidate weights, ones at the final timepoint) and a
+worked sketch. Like `coupled_transitions`/`coupling_trans_mat`, the package stays
+ignorant — it takes whatever function it's handed.
+
+**The badger implementation (`examples/badger_model_reststotal.jl`).** The
+derivation that made this both O(n_states) AND exact — arrived at only after two
+wrong attempts, each caught by a direct entry-for-entry check against the
+brute-force `rest_contribution` (`scratchpad/rest_match.jl`, the discipline that
+mattered here):
+
+A susceptible neighbour's realised one-step move contributes, per focal candidate
+scenario c, only:
+- `S -> E`: `survival_j · foi_c`   → c-dependent part `log(foi_c)`
+- `S -> S`: `survival_j · (1-foi_c)` → c-dependent part `log(1-foi_c)`
+- `S -> D`: `1 - survival_j`         → **does NOT depend on c**
+
+(`S -> I` is impossible in one step.) The individual survival factor is not coupled
+to the focal, so it is constant across c; the `S -> D` term is entirely c-independent.
+BOTH cancel when `rest_contribution` normalises (`logw .-= maximum(logw)`). So the
+only thing that survives is
+
+    restTotal_c = nSE · log(foi_c) + nSS · log(1-foi_c)
+
+where nSE / nSS are just COUNTS of susceptible neighbours moving S->E / S->S — two
+integer reversible aggregates (a susceptible individual doing S->E increments nSE,
+S->S increments nSS), order-independent, no staleness. The three scenario FOIs
+(`SorE`/`I`/`D`, from the three distinct (I,M) the focal's four candidate states
+induce) are cheap enough to recompute on demand — 3 numbers — so nothing else is
+cached. Because iFFBS reverses the focal out of the aggregates before
+`forward_filter`, nSE/nSS already exclude the focal; no self-subtraction needed.
+
+**Two dead ends first, both worth recording:**
+1. Caching a per-neighbour float `restRow[j,t,c]` + group float `restTotal[g,t,c]`,
+   rebuilt by a per-individual summary. Fragile: the per-individual zero-and-re-sum
+   left `restTotal` reflecting whichever individual fired last during the
+   incremental `apply_derived_summaries!` build, with stale counts. Differed from
+   brute-force by 0.346.
+2. Even with the total made consistent, the row used a binary `to_E ? foi : 1-foi`,
+   which mis-scored `S -> D` (death) moves as `S -> S` — injecting spurious
+   candidate-dependence where the true `S -> D` term is candidate-constant. Same
+   0.346 error. The single-cell dissection (`scratchpad/rest_five.jl`) that showed
+   `S->D` neighbours with a flat `transition_prob = 1e-12` across all four
+   candidates is what revealed the S->D-cancels insight and led to the
+   integer-count decomposition.
+
+The integer-count version matches brute-force to **5.1e-13** across 4846 cells
+(4381 with informative coupling).
+
+**Result (ForwardDiff, warm-up excluded, min/mean/median):**
+
+| variant | iFFBS sweep | gradient (61 params) |
+|---|---|---|
+| base (brute-force coupling) | 2.604 / 2.784 / 2.737s | 0.104 / 0.149 / 0.148s |
+| **reststotal (this)** | **0.784 / 0.832 / 0.845s** | 0.101 / 0.115 / 0.115s |
+| reference (context) | ~1.0-1.5s | ~0.1s |
+
+**iFFBS 3.24x faster** (2.737 → 0.845s), now ~1.5x FASTER than the reference's own
+sweep — from ~6x SLOWER at the start of the day. Gradient untouched, as it must be:
+`rest_contribution` is never on the AD path. Exact posterior (5e-13 vs the
+brute-force coupling).
+
+The whole "close the iFFBS gap" arc landed as three additive, opt-in power-user
+levers over an unchanged generic core — `coupled_transitions` (skip uncoupled
+neighbours), `coupling_trans_mat` (cache the rate the coupling reads), and now
+`rest_contribution` (replace the coupling loop with a running total) — none of
+which the package understands beyond their signatures. The central design rule
+held: every speedup is user code the package takes on trust, not a special case
+baked into it.

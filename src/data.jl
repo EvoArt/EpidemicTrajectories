@@ -183,6 +183,10 @@ Build the [`EpidemicData`](@ref) for a model.
   entirely if your model has no fixed groups.
 - `state_space`: state names, in the order that fixes their encoding in `X`.
   Defaults to the transitions' own state list.
+- `rest_contribution`: power users only — replaces the whole coupling term, not
+  just the rate it evaluates. Defaults to `nothing`, meaning
+  [`make_rest_contribution`](@ref)'s brute-force counterfactual loop. See its own
+  section further down before using this.
 - `derived_summaries`: only needed with the verbose fallback (see below).
 - `extras...`: anything else your functions need — covariates, test matrices,
   capture histories, time-varying group membership. Reachable as `data.name`. The
@@ -237,6 +241,60 @@ epidemic_data(;
 
 The two specs must agree mathematically; the package cannot check that for you
 (and does not try), it only takes the two you hand it.
+
+**A custom `rest_contribution`** (power users; skip unless the coupling term is
+your bottleneck — check with a profiler first). [`make_rest_contribution`](@ref)'s
+default is brute force: for each of `i`'s `n_states` candidate states, apply it,
+loop over every one of `i`'s `affected_individuals`, ask `coupling_trans_mat` how
+likely each neighbour's realised move is, then undo it. That is exact and assumes
+nothing about your model — which is also why it is `O(n_states × |affected|)` per
+`(i, t)`, and on a model with dense coupling (many affected neighbours per
+individual) it dominates the sweep.
+
+A model whose coupling factors through a per-group (or otherwise low-cardinality)
+running total can often do this in `O(n_states)` instead — no loop over neighbours
+at all — by maintaining the total as a reversible aggregate (same mechanism as any
+other) and reading it directly. Pass your own function with the SAME signature
+`make_rest_contribution` builds:
+
+```julia
+(model, data, X, i, t, n_states, affected_override=nothing) -> vector of length n_states
+```
+
+Contract to honor, all three matter:
+- Element `s` of the returned vector is (proportional to) the probability of
+  everything `i` affects at time `t`, GIVEN `i` is in state `s` at `t`. It need
+  not be normalised — [`forward_filter`](@ref) normalises the product it appears
+  in — but the SAME normalisation (or none) must be used for every `s`.
+- At `t == data.n_timepoints` there is no `t -> t+1` move to be informative about;
+  return a vector of ones (or anything constant across `s`).
+- The function may read `X`/`data.aggregates` but must leave them EXACTLY as it
+  found them on return — `forward_filter` calls this once per timepoint in a
+  window, back to back, and relies on it being side-effect-free from the outside.
+
+Sketch, for a model where the coupling is entirely through a per-`(group,time)`
+force of infection (the badger model's shape): maintain
+`logProbRestTotal[s, t]` — the sum, over ALL individuals, of "how likely was this
+individual's realised move if the group's FOI corresponded to candidate state
+`s`" — as a derived summary, patched incrementally the same way `i`'s aggregate
+contribution already is (reverse `i`'s row, recompute it, add it back). Then
+
+```julia
+function fast_rest_contribution(model, data, X, i, t, n_states, affected_override=nothing)
+    t == data.n_timepoints && return ones(n_states)
+    logw = data.aggregates.logProbRestTotal[:, t] .- data.aggregates.logProbRestRow[:, i, t]
+    exp.(logw .- maximum(logw))
+end
+```
+
+turns the neighbour loop into an array subtraction: `O(n_states)`, independent of
+`|affected|`. The work moves from every `forward_filter` call into maintaining
+`logProbRestRow`/`logProbRestTotal` as reversible aggregates — cheaper because
+each individual's row changes only when ITS OWN trajectory changes, not every
+time a neighbour's does. This is the reference implementation's own design
+(`logProbRest`/`logProbRestTotal`, incrementally patched); porting it is exactly
+this — a `rest_contribution` the package knows nothing about beyond its
+signature, backed by aggregates the package equally knows nothing about.
 """
 function epidemic_data(; n_individuals, n_timepoints, trans_mat,
                          coupling_trans_mat=trans_mat,
@@ -246,6 +304,7 @@ function epidemic_data(; n_individuals, n_timepoints, trans_mat,
                          sampling_period=nothing,
                          affected_individuals=nothing,
                          coupled_transitions=nothing,
+                         rest_contribution=nothing,
                          state_space=trans_mat.states, derived_summaries=nothing,
                          extras...)
     # An @aggregate declaration carries both the storage to allocate and the
@@ -295,9 +354,16 @@ function epidemic_data(; n_individuals, n_timepoints, trans_mat,
     # it is the only one that may safely use a spec with cached, parameter-derived
     # rates. Defaults to `trans_mat` — see this function's docstring.
     neighbor_logprob = make_neighbor_logprob_from_transitions(coupling_trans_mat)
-    rest_contribution = make_rest_contribution(affected_ids=affected_ids,
-                                               neighbor_logprob=neighbor_logprob,
-                                               coupled_mask=coupled_mask)
+    # `make_rest_contribution`'s brute-force counterfactual loop is the DEFAULT,
+    # not the only option — a motivated user who knows their coupling structure
+    # (e.g. it factors through a per-group running total, as the reference
+    # implementation's does) can supply their own `rest_contribution` of the same
+    # signature and skip the O(n_states × |affected|) recompute entirely. See this
+    # function's docstring for the contract and a worked sketch.
+    rest_contribution = rest_contribution !== nothing ? rest_contribution :
+        make_rest_contribution(affected_ids=affected_ids,
+                                neighbor_logprob=neighbor_logprob,
+                                coupled_mask=coupled_mask)
 
     EpidemicData(
         n_individuals,

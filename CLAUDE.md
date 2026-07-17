@@ -181,16 +181,65 @@ out of a state sum to one, so influencing `S -> E` necessarily influences `S -> 
 Masking only the named transition changes the sampler's weights by ~0.25. There are
 tests for both properties; do not "simplify" them away.
 
-Future work, roughly in order of expected value:
-- **Infer the coupled set** from the transition spec rather than having the user
-  declare it: the package can in principle see which rate functions touch the
-  aggregates. User-declared works and is explicit, so this is convenience.
-- Memoise the coupling per MCMC iteration (the reference's `logProbRest` cache),
-  clearing each sweep. Not currently needed — the two fixes above made it moot for
-  the badger model.
+3. **`coupling_trans_mat`.** A separate `TransitionSpec` for the coupling term ONLY
+   (`epidemic_data(...; coupling_trans_mat=trans_mat)`, default unchanged). The
+   coupling term (`rest_contribution` → `neighbor_logprob`) is never differentiated
+   — profiling put it at ~70% of an iFFBS sweep — so it is the one place a rate
+   that reads a CACHED, parameter-derived quantity (e.g. a per-`(group,time)` force
+   of infection a derived summary maintains) is both safe and worthwhile. Safe
+   because `epidemic_loglik` never sees `coupling_trans_mat`, so the cache is
+   structurally unreachable from AD — unlike putting a cached rate straight in
+   `trans_mat`, which silently zeroes the gradient w.r.t. whatever fed the cache
+   while leaving the log-density bit-identical (measured: gradient collapsed to
+   the prior's ~±1 instead of +300/-195/-20/+26, no warning at all). Measured
+   worth: ~1.19x on the badger model — real, but far short of hoped-for, because
+   (see next point) the FOI arithmetic was never the dominant cost inside the
+   coupling loop.
+
+**Where the remaining gap is (2026-07-17 investigation, not yet acted on).**
+After (1)-(3), badger iFFBS is ~1.5-2x the reference's own sweep. Profiling BOTH
+sides (not just ours) settled why:
+
+- Our `rest_contribution` is **O(n_states × |affected|) per `(i,t)`**: for every
+  candidate state of the focal, loop over every affected neighbour and call
+  `neighbor_logprob`. On badgers, `4 × ~70 ≈ 280` neighbour-visits per timepoint.
+- The reference's equivalent is **O(n_states) per `(i,t)`**: `logProbRestTotal[s,t]`
+  is a running total over ALL individuals, maintained incrementally
+  (`updateLogProbRestTotalIndiv!`: subtract the focal's OLD row, recompute just
+  that one row, add it back — ~13 array ops/timepoint, no neighbour loop at all).
+- **The reference's own `@batch per=thread`/`@batch per=core` (Polyester),
+  applied to this update, is close to a wash on this workload** — confirmed by
+  disabling all four call sites and re-profiling: single-threaded iFFBS (1.064s)
+  was at or below every threaded run measured (0.98-1.86s across repeated runs),
+  and the threaded profile was ~90% thread-dispatch/wait/idle-spin, not algorithm
+  — a fine-grained-parallelism anti-pattern (a batch region launched 3× PER
+  INDIVIDUAL over only 160 iterations each, not once for the whole sweep). So the
+  reference's own wall-clock numbers were, all session, an underestimate of what
+  its algorithm can do.
+- Secondary factor, not yet measured directly: array layout.
+  `logProbRest[s,jj,tt]` is `s`-fastest-varying (column-major), so the reference's
+  4-state read/write clump is one cache line; our `X[t,i]` is `t`-fastest-varying,
+  so the neighbour loop strides across `n_timepoints` per neighbour — a cache
+  miss on every one of the ~280 visits.
+
+**Open, NOT implemented: port the same O(n_states)-per-`(i,t)` running-total
+shape as a package-side change** (a generic `logProbRest`-equivalent + incremental
+patch, replacing `rest_contribution`'s counterfactual recompute). Bigger than
+`coupling_trans_mat` (structural, not a keyword); needs invalidation reasoned out
+generically from `affected_individuals`/`coupled_transitions` (both already
+user-declared, so this is believed tractable — see repro log for the earlier,
+now-revisited rejection). Single-threaded first, per the finding above. Needs
+sign-off before starting.
+
 - Profile with `ProfileToLLM` (`~/.julia/dev/ProfileToLLM`) rather than guessing;
-  it flags runtime dispatch and GC per line, which is how both wins above were
-  found. Guessing had pointed at the coupling, which was not the problem.
+  it flags runtime dispatch and GC per line, which is how wins 1-2 above were
+  found. Guessing had pointed at the coupling, which was not the problem (that
+  time). **Sort by TOTAL when deciding what to change, by SELF only when reading
+  what one line does** — a self%-sorted profile of the coupling term looked
+  completely flat (6.4%) and nearly sent the 2026-07-17 investigation in the
+  wrong direction; total% showed the true 69.5%. Same trap nearly repeated on the
+  reference's own profile before disabling `@batch` revealed it was measuring
+  thread overhead, not the algorithm.
 
 ## Known gaps in the current walkthrough design
 

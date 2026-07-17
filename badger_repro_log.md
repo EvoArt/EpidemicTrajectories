@@ -1226,3 +1226,91 @@ single post-warm-up samples; ours is stable at 2.1-2.6 across runs). So call it
 ForwardDiff (0.110s vs 0.091s) and ~2x adrift on PolyesterForwardDiff (0.061s vs
 0.033s) — the latter is a new observation, not yet investigated, and worth noting
 that PolyesterForwardDiff buys the reference 2.8x but us only 1.8x.
+
+### 2026-07-17 (cont.) — profiling the reference, and a real bug found in it
+
+Following the ~1.19x result above, user's direction: profile the reference itself
+and get an algorithmic breakdown, rather than keep inferring from source reading
+alone. Two things came out of this — one closes the algorithmic question, one is
+a genuine finding about the reference's own code.
+
+**First profile attempt: nearly all noise, not signal.** `BENCH_PROFILE=1` (added
+to `bench_mcmc_body.jl` earlier) had a scoping bug (`sumLogCorrector` was local to
+a loop that had already ended) that crashed print_profile after `Profile.@profile`
+had already captured data — fixed with a dedicated `profile_sumLogCorrector`
+local. Once fixed, the profile showed something unexpected: **`Polyester.batch` /
+`_batch_no_reserve` owned 92.4% of TOTAL time, `wait` 85.2%, and self-time was
+dominated by a bare integer `<` comparison (39.7%) and `process_events` (27.8%)**
+— i.e. thread-scheduler dispatch and idle-spin, not the algorithm. The real
+per-individual work (FOI arithmetic, `iFFBScalcLogProbRest!`) was invisible even
+at `max_rows=60`, buried under 44 more omitted rows of task-queue bookkeeping.
+
+**Why: `@batch per=thread`/`@batch per=core` is called PER INDIVIDUAL, twice.**
+Traced the call graph precisely this time (redefinition matters — Julia keeps the
+LAST definition when a function is defined twice in the same file, and
+`updaters.jl` has two definitions each of `updateLogProbRestTotal!` and
+`updateLogProbRestTotalIndiv!`; the dead first pair uses plain `@batch`, the live
+second pair uses `@batch per=thread`). Both live functions, plus
+`update_group_level_logs_from_counts!` (`transitions.jl:151`, `@batch per=core`),
+run once per `tt in 1:maxt-1` **inside `iFFBS()`, called once per individual** —
+so a sweep launches a threaded batch region 3 × 2384 = 7152 times, each over only
+160 iterations doing ~13 cheap array ops. That is a textbook too-fine-grained
+threading anti-pattern: the launch/dispatch/join cost is being paid far more
+often than the parallel work it buys.
+
+**Confirmed by disabling all four `@batch` sites (replaced with plain `for`,
+reverted immediately after — these are third-party reference files, not ours to
+keep edited).** Single-threaded, same profiling protocol: **iFFBS sweep = 1.064s**
+— at or below every threaded run measured today (0.98s, 1.201s, 1.468s, 1.705s,
+1.862s, noisy but none clearly faster than 1.064s). More importantly, the profile
+is now real: `updateLogProbRestTotal!` 31.5% total (15.0% self — the running-total
+patch), `iFFBScalcLogProbRest!` 4.4%+3.2% self across its two sites,
+`update_group_level_logs_from_counts!` 2.1% self. **The reference's own threading
+is a wash at best on this workload, and its published wall-clock numbers all day
+were measuring thread-scheduler overhead as much as algorithm.**
+
+**What this settles.** The O(maxt)-per-individual running-total design (`logProbRest[s,jj,tt]`
++ `logProbRestTotal[s,tt]`, patched by subtract-old/recompute-one-row/add-new
+rather than rebuilt) is genuinely cheap — ~13 ops/timepoint/individual, single-
+threaded, no neighbour loop at all. That is categorically different from our
+`rest_contribution`, which is O(n_states × |affected|) per `(i,t)` — for badgers,
+`4 × ~70 ≈ 280` neighbour-visits per timepoint against their ~13 array ops. The
+~20x-per-cell estimate from reading source alone holds up under profiling; it was
+never really in doubt. What was in doubt — whether the reference's ~1-1.5s
+wall-clock number was a fair thing to chase — is resolved: it is, and arguably
+beatable, since the reference is not even collecting on its own algorithmic
+advantage cleanly (threading tax eating into it).
+
+**Two structural reasons ours is slower than a same-shape port would be, beyond
+the O(n_states × |affected|) vs O(maxt) difference:**
+
+1. *Array layout.* Reference: `logProbRest[s, jj, tt]`, `s` fastest-varying
+   (column-major Julia) — the 4-state read/write clump at the top of
+   `updateLogProbRestTotalIndiv!` is one cache line. Ours: `X[t, i]`, `t`
+   fastest-varying — `rest_contribution`'s inner `for j in ids` loop reads
+   `X[t,j]`/`X[t+1,j]` for varying `j` at fixed `t`, striding across
+   `n_timepoints` per neighbour: a cache miss on every one of the ~280
+   neighbour-visits per timepoint. Not measured directly (would need a
+   cache-miss counter, not just wall-clock), but the layouts are unambiguous from
+   the code and consistent with the direction of the gap.
+2. *No running total at all.* Even ignoring cache effects, we literally
+   recompute the sum over affected individuals from scratch on every `(i,t)`
+   call, where the reference maintains it as state and only ever touches the ONE
+   row (`logProbRest[:, id, :]`) that actually changed.
+
+**Open design question — NOT implemented, for the user to decide.** Port the same
+shape: a package-side `logProbRest`-equivalent (`n_states × n_individuals ×
+n_timepoints`, or scoped to whatever each individual's own window needs) plus a
+running per-`(s,t)` total, patched incrementally per individual rather than
+rebuilt by `rest_contribution`'s counterfactual loop. This is Option 2 from the
+earlier entry today, rejected then on a guess that invalidation would touch most
+of what was cached (~70 neighbour-entries per resampled individual). That guess
+was about which CELLS go stale, not about whether maintaining a running TOTAL
+instead of recomputing a SUM is cheaper regardless — and today's profiling says
+yes, decisively, for the reference's own version of exactly this problem.
+Building it single-threaded (no `@batch`, per today's finding that threading this
+shape of loop is not obviously worth it) is the natural first attempt. This is a
+package-side structural change, materially bigger than `coupling_trans_mat`
+(one keyword) — needs sign-off before starting, and needs its own invalidation
+correctness worked out generically from `affected_individuals`/`coupled_transitions`
+(both already user-declared) rather than assumed.

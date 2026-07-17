@@ -447,3 +447,61 @@ the reference's `whichRequireUpdate`, which further restricts recomputation to
 individuals whose contribution actually changed. We recompute for every groupmate,
 for every candidate state, at every `(i, t)` — which is a large part of the
 4.7 min/sweep.
+
+### 2026-07-17 — profiling says the problem is types, not the coupling
+
+Used ProfileToLLM (`~/.julia/dev/ProfileToLLM`) on a real badger sweep rather than
+guessing. The result overturned what I was about to do.
+
+```
+ self%  total%  gc?  dispatch?   function              file:line
+  13.7    84.2    Y      Y       transition_matrix_at  src/transitions.jl:28
+  10.2    11.5    Y      Y       siler_survival        badger_model.jl:82
+   7.1     8.7    Y      Y       siler_survival        badger_model.jl:84
+   6.4    12.0    Y      Y       siler_survival        badger_model.jl:85
+   6.4     6.6    Y      Y       siler_survival        badger_model.jl:81
+   6.1     6.4    Y      Y       siler_survival        badger_model.jl:83
+   ...     ...    Y      Y       (every row)
+```
+
+`transition_matrix_at` is 84% of total, as expected — it is the hub. But
+`siler_survival` alone is **~45% of self time, spread evenly across every line of
+the formula**, and — the real finding — **every row is flagged for both runtime
+dispatch and GC**. That is not "the coupling is inherently expensive". It is
+type instability, everywhere.
+
+Confirmed the cause directly:
+
+| field | type | consequence |
+|---|---|---|
+| `extras` | `Dict{Symbol,Any}` | **`data.age` infers to `Any`** |
+| `aggregates` | `Dict{Symbol,Any}` | every FOI read is `Any` |
+| `rate_fns` | `Vector{Function}` | every rate call dispatches |
+
+So each `data.age[i,t]`, `data.social_group[i,t]`, `data.capture[t,i]`,
+`data.tests[t,i,j]` and `data.aggregates[:n_infectious][g,t]` returns `Any`, and
+the arithmetic on top of it dispatches at runtime and boxes. That is the 1.07 GiB
+per likelihood call, and most of the 4.7 min/sweep.
+
+**The irony is mine.** `extras` was added *precisely so the package would not
+assume what a model carries* — the central design rule. But `Dict{Symbol,Any}` was
+a lazy way to spell "anything", and it made the hot path pay for that generality on
+every single read. The rule doesn't require this: a `NamedTuple` is just as open —
+the user still puts whatever they like in it — while being concretely typed, so
+`data.age` infers to `Matrix{Int64}` and the arithmetic compiles. The cattle model
+never showed this because its rates read almost nothing off `data`.
+
+**Next (in priority order), and note this comes BEFORE the coupling cache:**
+1. `extras::Dict{Symbol,Any}` → `NamedTuple`. Should be the single biggest win,
+   and it costs the user nothing (`epidemic_data(...; age=..., capture=...)` is
+   unchanged).
+2. `aggregates::Dict{Symbol,Any}` → `NamedTuple` too. Same argument. `@aggregate`
+   already knows the names and element types at macro time, so it can build a
+   concretely-typed container — which is what the old `GroupStat` plan was trying
+   to achieve, obtainable here for free.
+3. `rate_fns::Vector{Function}` → a `Tuple`, so each rate's concrete type is known
+   and the calls devirtualise.
+4. Only then reconsider the coupling cache / memoisation. It may not be needed.
+
+This is why the profiler was worth using: I would have built the cache first and
+left a 10x type-instability tax underneath it.

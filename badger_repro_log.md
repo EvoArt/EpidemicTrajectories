@@ -505,3 +505,55 @@ never showed this because its rates read almost nothing off `data`.
 
 This is why the profiler was worth using: I would have built the cache first and
 left a 10x type-instability tax underneath it.
+
+### 2026-07-17 — the fix: NamedTuple + `Val`-dispatched `getproperty` (measured)
+
+Arthur's steer: after construction the arrays must have known types, as the
+reference achieves with its hand-written `iFFBS_Data` — but **without the user
+writing a struct**, and not necessarily by the same mechanism.
+
+A `NamedTuple` *is* "a struct with known types, generated for you", so the user's
+call site never changes. But getting it right took two false starts, both worth
+recording:
+
+**False start 1 — "NamedTuples are slower".** My first benchmark said NT was 2x
+*slower* than Dict, while allocating 13x less. Those two facts cannot both be a
+real property of NamedTuples, so I dug instead of reporting it.
+
+**The culprit was my own `getproperty`**, in both versions:
+
+```julia
+Base.getproperty(d, s::Symbol) = s in fieldnames(EpidemicData) ? getfield(d, s) : ...
+```
+
+`s in fieldnames(T)` is a **runtime search over a tuple of symbols, on every single
+property access**, and it allocates. Dispatching on `Val(s)` instead moves the
+decision to compile time:
+
+```julia
+@inline Base.getproperty(d::EpidemicData, s::Symbol) = _get(d, Val(s))
+@inline _get(d::EpidemicData, ::Val{:extras}) = getfield(d, :extras)
+@inline _get(d::EpidemicData, ::Val{s}) where {s} = getfield(getfield(d, :extras), s)
+```
+
+Isolated: 11.7 ms / 20k allocations → **18.9 µs / 0 allocations. A 620x
+difference**, from the accessor alone.
+
+**False start 2 — inference was a false all-clear.** Both the broken and the fixed
+version report `Base.return_types(d -> d.age) == Matrix{Int64}`. Inference being
+clean says nothing about whether the *accessor* is cheap. Only benchmarking found
+it.
+
+**The real comparison**, on the badger model's two hottest functions over 20k
+(i, t) cells:
+
+| | today (`Dict{Symbol,Any}`) | proposed (NamedTuple + Val) | gain |
+|---|---|---|---|
+| `siler_survival` | 15.1 ms, 520k allocs, 7.9 MiB | **0.82 ms, 0 allocs, 0 B** | **18x** |
+| force of infection | 7.6 ms, 240k allocs, 3.7 MiB | **1.05 ms, 0 allocs, 0 B** | **7x** |
+
+Zero allocations in both. This is the whole 1.07 GiB per likelihood call.
+
+Implementing now: `extras` and `aggregates` become NamedTuples, `EpidemicData`
+gains type parameters for them, `getproperty` dispatches on `Val`, and `rate_fns`
+becomes a `Tuple`. The user-facing API does not change.

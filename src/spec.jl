@@ -116,10 +116,13 @@ function _parse_transition_block(block)
             if length(line.args) >= 4
                 kw = line.args[4]
                 if kw isa Expr && kw.head == :(=) && kw.args[1] == :death
-                    death_state = kw.args[2]
+                    # `death=:D` gives a QuoteNode; `death=D` a bare Symbol. Accept
+                    # both and carry the state name as a plain Symbol.
+                    death_state = kw.args[2] isa QuoteNode ? kw.args[2].value : kw.args[2]
                 end
             end
-            death_state === nothing && error("@survival requires death=:State")
+            (death_state isa Symbol) ||
+                error("@survival requires `death=:State` naming the death state, got: $(death_state)")
             continue
         end
 
@@ -144,9 +147,18 @@ function _parse_transition_block(block)
         transitions = map(transitions) do (from, to, rate)
             to == death_state ? (from, to, rate) : (from, to, :(($survival_expr) * ($rate)))
         end
-        src_states = unique(first.(transitions))
-        for s in src_states
-            s == death_state && continue
+        # Every live state can die, not just the ones that happen to appear as a
+        # source above — an absorbing state like `I` (which only ever appears as a
+        # destination) still needs its `I -> D`. So collect the live states from
+        # BOTH sides of every transition.
+        live_states = Symbol[]
+        for (from, to, _) in transitions
+            for s in (from, to)
+                s == death_state && continue
+                s in live_states || push!(live_states, s)
+            end
+        end
+        for s in live_states
             if !any(t -> t[1] == s && t[2] == death_state, transitions)
                 push!(transitions, (s, death_state, :(1 - ($survival_expr))))
             end
@@ -160,10 +172,26 @@ end
     @survival expr death=:State
 
 Declare, inside a [`@transitions`](@ref) block, that every step is conditional on
-survival: each non-death transition's rate is scaled by `expr`, and every live
-state gains a transition to `death` with the remaining probability `1 - expr`.
+survival: each non-death transition's rate is scaled by `expr`, and **every** live
+state gains a transition to `death` with the remaining probability `1 - expr` —
+including states that never appear as the source of a declared transition.
 
-Only meaningful inside `@transitions`; it expands to nothing on its own.
+`expr` is a rate, so it takes the usual sugar: a bare function name, a composition,
+or an explicit `(model, data, i, t)` lambda.
+
+Only meaningful inside `@transitions`, which consumes it while parsing; it expands
+to nothing on its own.
+
+# Example
+```julia
+# S -> E -> I, each step conditional on surviving, and any live state may die
+spec = @transitions [:S, :E, :I, :D] begin
+    @survival siler_survival death=:D
+    S -> E = infection
+    E -> I = progression
+end
+# gives (S,E), (E,I), (S,D), (E,D), (I,D) — note the I -> D you never wrote
+```
 """
 macro survival(args...)
     return nothing

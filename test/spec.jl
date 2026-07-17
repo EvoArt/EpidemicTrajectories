@@ -82,6 +82,38 @@ end
     @test spec.auto_self == false
 end
 
+@testset "@survival: scales the live transitions and adds the deaths" begin
+    # The badger structure: S -> E -> I -> D, every step conditional on surviving.
+    spec = @transitions [:S, :E, :I, :D] begin
+        @survival surv death=:D
+        S -> E = foi
+        E -> I = 0.2
+    end
+    model = (; m=5.0)
+
+    # every live state can die — including I, which only ever appears as a
+    # DESTINATION above and so has no declared transition out of it
+    @test (:S, :D) in spec.transitions
+    @test (:E, :D) in spec.transitions
+    @test (:I, :D) in spec.transitions
+
+    rate_of(from, to) = spec.rate_fns[findfirst(==((from, to)), spec.transitions)](model, nothing, 1, 1)
+
+    # the live transitions are scaled by survival...
+    @test rate_of(:S, :E) ≈ 0.9 * 0.1
+    @test rate_of(:E, :I) ≈ 0.9 * 0.2
+    # ...and death takes the leftover
+    @test rate_of(:S, :D) ≈ 1 - 0.9
+    @test rate_of(:I, :D) ≈ 1 - 0.9
+end
+
+@testset "@survival: needs a death state" begin
+    @test_throws Exception @eval @transitions [:S, :D] begin
+        @survival $surv
+        S -> D = 0.1
+    end
+end
+
 @testset "@transitions: bad tag errors" begin
     @test_throws Exception @eval @transitions :nonsense begin
         S -> I = $foi

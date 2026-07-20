@@ -284,8 +284,8 @@ end
 # lays out the flat vector in model-declaration order, restricted to the
 # block's own names): tau, alpha, lambda, beta, q, c1, a1, b1, a2, b2,
 # thetas, rhos, phis.
-# Trajectory length: RANDOMISED, uniform on {1, ..., HMC_L}, matching the
-# reference exactly.
+# Trajectory length: FIXED at 15 — the reference's EXPECTED length, not its
+# nominal L=30.
 #
 # badger_ref's HMC_.cpp:71 draws `int intL = ceil(runif(0,1) * L)` with L=30 —
 # uniform on {1,...,30}, mean 15.5 — then does `intL - 1` gradient calls inside

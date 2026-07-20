@@ -23,12 +23,46 @@
 # laptop), NOT ~3x, because the observation term uses the allocation-free
 # `observation_weight` path (gradient 0.226 -> 0.075 s; 18 MB -> 16 bytes/call).
 #
-# Blocking: ONE HMC block for all 61 continuous parameters. Splitting the test
-# parameters into their own block — mirroring the C++ reference's
-# grad_/gradThetasRhos split — was measured 23% SLOWER (4.527 vs 3.663 s/sweep),
-# because PracticalBayes evaluates the whole model body per block, so two blocks
-# means two full primal evaluations AND two L=30 leapfrog trajectories.
-# See perf_gap_log.md for the full benchmark table.
+# Blocking: ONE HMC block for all 61 continuous parameters, with etas/nu
+# conjugate. Splitting the test parameters into their own block — mirroring the
+# C++ reference's grad_/gradThetasRhos split — was measured 23% SLOWER (4.527 vs
+# 3.663 s/sweep), because PracticalBayes evaluates the whole model body per
+# block, so two blocks means two full primal evaluations AND two leapfrog
+# trajectories. See perf_gap_log.md for the full benchmark table.
+#
+# ---------------------------------------------------------------------------
+# 2026-07-20: PERFORMANCE — iFFBS 3.0x faster, and L halved to match the reference
+# ---------------------------------------------------------------------------
+# Two package-internal iFFBS fixes (bit-identical output, verified against the
+# pre-change code on both X and every aggregate array):
+#
+#   * `apply_summaries!` — the derived-summaries loops were iterating a Tuple of
+#     distinct closure types with a plain `for`, which infers their union and
+#     dispatches at RUNTIME on every call. Two lines, 42.7% of a sweep's self
+#     time. Now tuple-recursed, so each step sees one concrete function.
+#   * in-place forward/backward — sweep-level typed scratch instead of a fresh
+#     (and zeroed) `N x N x n_t` cache per individual, and fused loops that write
+#     into reused buffers rather than allocating `pred`/`unnorm`/`cond` per (i,t).
+#
+#     iFFBS sweep: 1.129 s / 717 MB  ->  0.375 s / 85.6 MB   (3.01x, 8.4x less)
+#
+# HMC_L is now 15, not 30. The reference draws `intL = ceil(runif(0,1)*30)` —
+# uniform on {1..30}, mean 15.5, so ~16.5 gradients per HMC step. A fixed L=30
+# was doing 1.82x the reference's gradient work for no added fidelity. We take
+# the expected value; a randomised-L kernel is buildable from AdvancedHMC's
+# public API but needs mutable state in the sampler struct, which is not worth
+# the fragility here (see badger_fit_reststotal_hmc.jl for the full reasoning).
+# Override with BADGER_HMC_L.
+#
+# MEASURED, all of today's changes together (8-thread laptop, 5 sweeps):
+#
+#   before today (L=30, slow iFFBS, no obs likelihood)   3.222 s/sweep
+#   corrected model + fast iFFBS + L=15                  2.033 s/sweep
+#     iFFBS 0.401 (19.7%) | etas 0.002 | HMC 1.631 (80.2%)
+#
+# ~1.59x faster per sweep than the pre-existing run AND statistically correct
+# (the old one sampled thetas/rhos/phis from their priors). 5000 sweeps:
+# ~4.5 h -> ~2.8 h on that laptop.
 #
 # Installs everything into a throwaway project (a temp depot-local env), pulling
 # the two unregistered packages straight from GitHub at the exact commits this
@@ -62,6 +96,7 @@
 #   BADGER_X_FLUSH       if X_SAVE=disk, sweeps per flushed file   (default 500)
 #   BADGER_ET_REV        EpidemicTrajectories git rev             (default "master")
 #   BADGER_PB_REV        PracticalBayes git rev                   (default: pinned SHA)
+#   BADGER_HMC_L         leapfrog steps per HMC move              (default 15)
 # =============================================================================
 
 using Pkg

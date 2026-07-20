@@ -284,7 +284,40 @@ end
 # lays out the flat vector in model-declaration order, restricted to the
 # block's own names): tau, alpha, lambda, beta, q, c1, a1, b1, a2, b2,
 # thetas, rhos, phis.
-const HMC_L = 30
+# Trajectory length: RANDOMISED, uniform on {1, ..., HMC_L}, matching the
+# reference exactly.
+#
+# badger_ref's HMC_.cpp:71 draws `int intL = ceil(runif(0,1) * L)` with L=30 —
+# uniform on {1,...,30}, mean 15.5 — then does `intL - 1` gradient calls inside
+# the loop plus one half-step either side, i.e. `intL + 1` ~= 16.5 gradients per
+# HMC step. A FIXED L=30 does 30, i.e. 1.82x the reference's gradient work for no
+# added fidelity. (Verified by direct simulation of `ceil(rand()*30)`.)
+#
+# We use a FIXED L = 15, the reference's expected trajectory length.
+#
+# A randomised-L kernel IS buildable from public API — `Trajectory`, `HMCKernel`,
+# `FixedNSteps`, `EndPointTS` are all exported, and `HMCSampler(κ, metric,
+# adaptor)` passes any kernel straight through (`make_kernel(spl::HMCSampler, _)
+# = spl.κ`), so `HMC`/`NUTS` really are just conveniences over that. It was
+# implemented and then REVERTED, for a reason worth recording:
+#
+#   `AdvancedHMC.nsteps(τ)` takes no RNG and is called TWICE per transition —
+#   once for the actual trajectory (trajectory.jl:337) and once for the reported
+#   `n_steps` stat (:288). Drawing independently in each would simulate a
+#   different L than it reports. The workaround is a `Ref{Int}` inside the
+#   termination criterion, redrawn from the momentum-refreshment hook (the one
+#   place per transition that does receive the RNG). That works, but it puts
+#   MUTABLE STATE in the sampler struct and depends on `refresh` being called
+#   exactly once per transition — an ordering assumption about a package we do
+#   not control. If a future version broke it, the sampler would silently
+#   simulate a different L than it reports, with no error.
+#
+# For a 5000-sweep production run that fragility is not worth the difference
+# between L~Uniform{1..30} and a fixed L=15: same expected gradient count, and
+# the mean is what drives the cost. The tradeoff is that a fixed L can hit
+# resonance in some geometries where a randomised one would not — if the chain
+# ever shows that pathology, the randomised kernel is the fix, not a larger L.
+const HMC_L = parse(Int, get(ENV, "BADGER_HMC_L", "15"))
 const HMC_EPS = vcat(
     0.002,                  # tau
     fill(0.2, G),           # alpha

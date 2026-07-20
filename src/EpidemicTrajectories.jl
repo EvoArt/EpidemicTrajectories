@@ -41,7 +41,7 @@ export TransitionSpec, @transitions, @survival
 
 # User-declared aggregates and their reversible updates
 export @aggregate, AggregateSpec, AggregateDeclaration, allocate_aggregates
-export reset_aggregates!, apply_derived_summaries!
+export reset_aggregates!, apply_derived_summaries!, apply_summaries!
 
 # The data container
 export EpidemicData, epidemic_data, members, build_affected_individuals_from_groups

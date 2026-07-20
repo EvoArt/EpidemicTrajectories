@@ -370,6 +370,228 @@ about the C++ (`logProbStoSgivenSorE = -alpha - beta*inf` never leaves log space
 whereas `badger_infection` does `-expm1(-foi)` and then `loglik` takes `log`) is
 still STRUCTURALLY true and worth ~8-10% at most on this evidence — not 25%.
 
+### 2026-07-20 — iFFBS: the derived-summaries loop was 42.7% of the sweep
+
+The user questioned whether ~1 s per iFFBS sweep was plausible on the optimised
+reststotal path. It was not. Measured first, then profiled:
+
+    iFFBS sweep: 1.129 s   751,503,904 bytes (716.7 MB)
+    186,850 (i,t) cells  =>  4,022 bytes PER CELL
+
+4 KB per cell, to produce a 4-element probability vector.
+
+**Inspection pointed at the wrong thing.** The obvious suspects were the ~8
+array allocations per `(i,t)` in `forward_filter`/`backward_sample!` (`pred`,
+`unnorm`, `cond`, the `./ z` temporaries). But 8 small arrays is ~114 MB of the
+717 MB — the arithmetic said ~48 small arrays per cell, so most of the cost was
+somewhere else. **Profiling, not reading, found it:**
+
+| self% | line | flags |
+|---|---|---|
+| **23.1** | `iffbs.jl:109` — `ds(...; reverse=true)` | **gc? Y  dispatch? Y** |
+| **19.6** | `iffbs.jl:118` — `ds(...)` | **gc? Y  dispatch? Y** |
+| 18.8 | `Array` (boot.jl:477) | gc? Y |
+
+The whole forward filter was only 15.5% total; `rest_contribution` 6.7%.
+
+**The cause.** `data.derived_summaries` is a `Tuple` of four DIFFERENT concrete
+closure types. `aggregates.jl` already documented that it is a Tuple
+"so `for ds in data.derived_summaries` in the hot loops specialises on one
+concrete function at a time" — **but that is not what a `for` loop does.** It
+infers the loop variable as the UNION of the element types and dispatches at
+runtime on every call, boxing arguments. Storing them as a Tuple is necessary but
+not sufficient; `rate_fns` got explicit tuple recursion (`_fill_rates!`) for
+exactly this reason, and `derived_summaries` never did.
+
+**The fix.** `apply_summaries!(summaries, model, data, X, s, i, t, reverse)` in
+`aggregates.jl` — recurses over the tuple so each step sees one concrete function
+type. `reverse` is passed POSITIONALLY, not as a keyword: a kwarg on a call the
+compiler cannot resolve forces the slow kwarg path (a NamedTuple allocation per
+call). Applied at all six call sites (`iffbs.jl` x2, `transitions.jl` x2 inside
+`rest_contribution`, `build.jl` x2).
+
+**Result — this change ALONE:**
+
+| | before | after | gain |
+|---|---|---|---|
+| iFFBS sweep | 1.129 s | **0.435 s** | **2.60x** |
+| allocated | 716.7 MB | **199.5 MB** | 3.59x |
+| per (i,t) cell | 4,022 B | 1,120 B | |
+
+The lesson is the one CLAUDE.md already records and this session keeps
+re-learning: **profile, don't infer.** Reading the code pointed confidently at
+the forward filter; the profiler pointed at two lines that looked inert.
+
+### 2026-07-20 — iFFBS change 2: in-place forward/backward
+
+The allocations inspection originally pointed at, now actually removed:
+
+* **Sweep-level scratch** (`_filter_scratch`). `probs` and `trans_cache` are
+  created by the forward pass, consumed by the backward pass, and dead by the end
+  of `iffbs_individual!` — nothing holds a reference across individuals (checked
+  before relying on it). So one buffer sized to the LONGEST sampling window
+  serves the whole sweep, each individual using the leading `1:n_t` slice.
+  Previously every individual allocated AND ZEROED a fresh `N x N x n_t`
+  `trans_cache` (~20 KB) plus an `n_t x N` `probs` — ~48 MB of pointless zeroing
+  per badger sweep, in a fresh cold region each time.
+* **Fused forward loop** (`forward_filter!`). `pred = trans' * probs[j-1, :]`
+  (which also materialised a transpose), `unnorm = pred .* obs_w .* rest_w`, and
+  the `./ z` normalisation were three fresh N-vectors per `(i,t)`. Now one pass
+  over the N candidate states writing into a reused buffer, with an explicit
+  matvec — N is 4 in the reference model, well below where BLAS pays for its call
+  overhead.
+* **Backward pass**. `cond = probs[j,:] .* trans[:,bnext]` and `cond ./ z` were
+  two more N-vectors per timepoint (~374k allocations per sweep); both now write
+  into a reused buffer.
+
+The scratch lives in a module-level `Ref` rather than being threaded through the
+signatures, which is safe ONLY because `iffbs!` is single-threaded by
+construction: individuals within a sweep share mutable aggregate state through
+the reverse/re-apply invariant, so they cannot be run in parallel anyway. If that
+ever changes, this becomes per-task state and the `Ref` must go.
+
+**VERIFIED EXACT** (`/tmp/iffbs_exact.jl`, reference generated from the
+pre-optimisation commit, 5 sweeps from a fixed seed):
+
+```
+X        : IDENTICAL
+aggregates: IDENTICAL
+>>> PASS: optimised iFFBS reproduces the reference sweep exactly.
+```
+
+Both the full 161x2384 `X` and all four aggregate arrays. This mattered: reusing
+one buffer across individuals is exactly the shape of change that can silently
+leak state between them, and a wrong-but-fast sampler is worthless.
+
+**FIRST ATTEMPT MADE IT SLOWER — worth recording.** The scratch was initially
+held in a `const Ref{Any}(nothing)` containing a NamedTuple. Result:
+
+| | sweep | allocated |
+|---|---|---|
+| after change 1 only | 0.435 s | 199.5 MB |
+| + in-place, `Ref{Any}` scratch | **0.546 s** | 139.5 MB |
+
+**Allocation fell 30% and the sweep got 26% SLOWER.** `Ref{Any}` hands back
+`Any`, so every `s.probs` / `s.cur` / `s.w` was a dynamic field lookup and the
+buffers arrived in `forward_filter!` / `backward_sample!` untyped — reintroducing
+type instability across the entire inner loop, ~4,768 scratch fetches per sweep
+plus untyped array accesses inside them. The instability cost more than the
+allocations it removed.
+
+Fixed by making the scratch a concretely-typed `struct FilterScratch` with a
+`Ref{Union{Nothing,FilterScratch}}` and a `::FilterScratch` return annotation.
+
+Two lessons, both already in CLAUDE.md and both re-learned the hard way here:
+1. **Fewer allocations is not automatically faster.** Allocation and type
+   stability are separate axes, and trading one for the other can lose.
+2. **Measure each change on its own.** Had these two changes been made together,
+   the summaries fix (2.6x) would have masked the in-place regression entirely,
+   and the `Ref{Any}` instability would have shipped invisibly.
+
+**With the typed struct** (10 sweeps each, same harness, quiet machine):
+
+| version | min | median | allocated |
+|---|---|---|---|
+| after change 1 only | — | 0.435 s | 199.5 MB |
+| + in-place, `Ref{Any}` | 0.447 | 0.510 s | 139.5 MB |
+| **+ in-place, typed** | **0.338** | **0.375 s** | **85.6 MB** |
+
+Re-verified bit-identical after the typing fix (`X` and all four aggregates).
+
+### iFFBS: cumulative result
+
+| stage | sweep | allocated |
+|---|---|---|
+| original | 1.129 s | 717.0 MB |
+| + `apply_summaries!` tuple recursion | 0.435 s | 199.5 MB |
+| + in-place forward/backward (typed scratch) | **0.375 s** | **85.6 MB** |
+
+**3.01x faster, 8.4x less allocation, bit-identical output.**
+
+Effect on the whole Gibbs sweep: 3.663 -> ~2.909 s (**1.26x**), i.e. 5000 sweeps
+goes from ~5.09 h to ~4.04 h on this laptop. Both changes are package internals
+(`src/aggregates.jl`, `src/iffbs.jl`) — no API change, no user involvement.
+
+Note the split shifts again: iFFBS is now ~13% of a sweep (0.375 of 2.909) and
+the HMC/AD block ~85%. The gradient is once more the only thing that matters,
+and per the gradient profile it has no dispatch and no GC left to remove — so
+the remaining levers are the two structural ones (randomized `intL`, and a
+hand-derived gradient seam), not micro-optimisation.
+
+### 2026-07-20 — L=30 -> 15: we were doing 1.82x the reference's gradient work
+
+**Verified the reference's behaviour by direct simulation**, not by reading:
+`ceil(runif(0,1)*30)` is uniform on {1,...,30}, mean 15.498 over 2M draws
+(exactly the analytic (1+L)/2 = 15.5). The C++ then does `intL - 1` gradient
+calls in the loop plus a half-step either side = `intL + 1` ~= **16.5 gradients
+per HMC step**. Our fixed `HMC(L=30)` does 30. So we were doing **1.82x** the
+reference's gradient work — pure cost, no added fidelity.
+
+**Checked that L is not doubled/rescaled anywhere before reaching the HMC code**
+(user's request, and worth it): `runmodel.R:39` sets `L <- 30` and passes it
+unchanged (`L=L`, line 359); `MCMCiFFBS_.cpp` mentions `L` exactly three times —
+the parameter and two pass-throughs (lines 805, 851); `HMC_.cpp:71` and
+`HMC_thetas_rhos.cpp:51` both use it directly as `ceil(runif(0,1)*L)`. No
+doubling. Counting the loop body: 1 initial gradient, then `intL - 1` iterations
+of (position update + gradient), then a final position update + gradient — i.e.
+**`intL` position updates and `intL + 1` gradients**. Our `HMC(L=15)` does 15
+position updates and ~16 gradients: correctly matched.
+
+*Separate fidelity note, NOT a count issue.* The reference divides the momentum
+update by 2 at EVERY step including interior ones (`HMC_.cpp:77-80`), where
+textbook leapfrog uses full interior steps and halves only at the ends. So its
+effective interior step size is half nominal. That is an epsilon difference, not
+a trajectory-length one, and our epsilons are matched separately via the mass
+matrix. Flagged here because it means our sampler is not a step-for-step clone of
+the reference's dynamics even with L matched — worth knowing if posteriors are
+ever compared draw-for-draw rather than in distribution.
+
+**Can we randomise L without touching internals? YES — and it was still
+rejected.** The initial answer here was "no public option", which was WRONG:
+`Trajectory`, `HMCKernel`, `FixedNSteps`, `EndPointTS` are all exported, and
+`HMCSampler(κ, metric, adaptor)` passes any kernel straight through
+(`make_kernel(spl::HMCSampler, _) = spl.κ`). `HMC`/`NUTS` are genuinely just
+conveniences over that, so a custom termination criterion is supported API.
+
+It was implemented, then reverted on the user's "only if it's clean and unlikely
+to cause a slowdown" constraint, because of one real wrinkle:
+`AdvancedHMC.nsteps(τ)` takes no RNG and is called TWICE per transition — for the
+trajectory (trajectory.jl:337) and for the reported `n_steps` stat (:288).
+Drawing independently in each simulates a different L than it reports. The
+workaround needs a `Ref{Int}` in the termination criterion, redrawn from the
+momentum-refreshment hook. That works but puts MUTABLE STATE in the sampler and
+depends on `refresh` firing exactly once per transition — an ordering assumption
+about a package we do not control, which if broken fails SILENTLY. Not worth it
+for a 5000-sweep production run when a fixed L=15 has the same expected cost.
+
+Tradeoff recorded: a fixed L can hit resonance in geometries where a randomised
+one would not. If the chain shows that, the randomised kernel is the fix — not a
+larger fixed L.
+
+**Result (5 sweeps, 8-thread laptop):**
+
+| | s/sweep | iFFBS | etas | HMC |
+|---|---|---|---|---|
+| L=30 (with today's iFFBS fixes) | 3.625 | 0.400 | 0.003 | 3.222 |
+| **L=15** | **2.033** | 0.401 | 0.002 | **1.631** |
+
+HMC halved exactly as predicted; **1.78x on the full sweep.**
+
+### Cumulative: where today ended up
+
+| | s/sweep | correct? |
+|---|---|---|
+| start of day (L=30, slow iFFBS, NO obs likelihood) | 3.222 | **NO** |
+| end of day (L=15, fast iFFBS, obs likelihood) | **2.033** | yes |
+
+**~1.59x faster AND statistically correct** — the original sampled
+thetas/rhos/phis from their priors. 5000 sweeps: ~4.5 h -> ~2.8 h on this laptop.
+
+Block split is now iFFBS 19.7% / HMC 80.2%, so the gradient remains the only
+thing that matters. Per the gradient profile it has no dispatch and no GC left,
+so the remaining lever is the structural one: a hand-derived gradient seam
+(what the C++ actually does). Needs sign-off.
+
 ## Entries
 
 ### 2026-07-20 — the observation likelihood was MISSING (a model bug, now fixed)

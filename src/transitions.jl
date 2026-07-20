@@ -265,9 +265,7 @@ function make_rest_contribution(; normalize=true, min_logprob=-1e12, affected_id
 
         for s in 1:n_states
             X[t, i] = s
-            for ds in data.derived_summaries
-                ds(model, data, X, s, i, t)
-            end
+            apply_summaries!(data.derived_summaries, model, data, X, s, i, t, false)
 
             acc = 0.0
             for j in ids
@@ -282,9 +280,7 @@ function make_rest_contribution(; normalize=true, min_logprob=-1e12, affected_id
                 acc += max(neighbor_logprob(model, data, X, j, t, i), min_logprob)
             end
 
-            for ds in data.derived_summaries
-                ds(model, data, X, s, i, t; reverse=true)
-            end
+            apply_summaries!(data.derived_summaries, model, data, X, s, i, t, true)
             logw[s] = acc
         end
 

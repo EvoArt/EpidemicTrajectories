@@ -31,9 +31,7 @@ function epidemic_simulator(data::EpidemicData)
         for t in 1:(data.n_timepoints - 1)
             # Fill this time slice's aggregates before the rates read them.
             for i in 1:data.n_individuals
-                for ds in data.derived_summaries
-                    ds(model, data, X, X[t, i], i, t)
-                end
+                apply_summaries!(data.derived_summaries, model, data, X, X[t, i], i, t, false)
             end
             for i in 1:data.n_individuals
                 P = transition_matrix_at(data.trans_mat, model, data, X, i, t)
@@ -45,9 +43,8 @@ function epidemic_simulator(data::EpidemicData)
         # exit the aggregates must agree with the whole of `X`, which is the
         # invariant the likelihood and the latent sampler both rely on.
         for i in 1:data.n_individuals
-            for ds in data.derived_summaries
-                ds(model, data, X, X[data.n_timepoints, i], i, data.n_timepoints)
-            end
+            apply_summaries!(data.derived_summaries, model, data, X,
+                             X[data.n_timepoints, i], i, data.n_timepoints, false)
         end
 
         X

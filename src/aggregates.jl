@@ -244,9 +244,15 @@ updates that maintain them. Pass it to [`epidemic_data`](@ref) as `aggregates`.
 `summaries` is a `Tuple`, not a `Vector{Function}`, for the same reason
 [`TransitionSpec`](@ref)'s `rate_fns` is: each summary is a distinct closure with
 its own concrete type, and `EpidemicData` propagates that type all the way through
-(see its `DS` type parameter) so `for ds in data.derived_summaries` in the hot
-iFFBS/simulate/coupling loops specialises on one concrete function at a time
-instead of dispatching through `Any` on every call.
+(see its `DS` type parameter).
+
+Storing them as a `Tuple` is necessary but NOT sufficient. A plain
+`for ds in data.derived_summaries` still infers the loop variable as the UNION of
+the element types and dispatches at runtime on every call — measured at 42.7% of
+an iFFBS sweep's self time across the two loops in `iffbs_individual!`, both
+flagged for GC and dynamic dispatch by the profiler. Call them via
+[`apply_summaries!`](@ref), which recurses over the tuple so each step sees one
+concrete function type — exactly what `_fill_rates!` does for `rate_fns`.
 """
 struct AggregateDeclaration{DS<:Tuple}
     specs::Vector{AggregateSpec}
@@ -309,10 +315,36 @@ function apply_derived_summaries!(model, data, X)
     for i in 1:data.n_individuals
         start_sampling, end_sampling = data.sampling_period[i]
         for t in start_sampling:end_sampling
-            for ds in data.derived_summaries
-                ds(model, data, X, X[t, i], i, t)
-            end
+            apply_summaries!(data.derived_summaries, model, data, X, X[t, i], i, t, false)
         end
     end
     nothing
+end
+
+"""
+    apply_summaries!(summaries::Tuple, model, data, X, s, i, t, reverse::Bool)
+
+Run every derived summary for `(i, t)` with candidate state `s`, forwards when
+`reverse` is `false` and in reverse when it is `true`.
+
+**Always call the summaries through this, never with `for ds in summaries`.**
+The summaries are a `Tuple` of DIFFERENT concrete closure types. A plain `for`
+loop infers the loop variable as their union, so every call dispatches at runtime
+and boxes its arguments — measured at **42.7% of an iFFBS sweep's self time**
+across the two loops in `iffbs_individual!` (both flagged `gc? Y  dispatch? Y` by
+the profiler), and a large share of the sweep's 717 MB of allocation.
+
+Recursing over the tuple one element at a time specialises each step on a single
+concrete function, so the call devirtualises and the arguments stay unboxed. This
+is the same fix `_fill_rates!` applies to `TransitionSpec`'s `rate_fns`, for the
+same reason — see the performance notes in CLAUDE.md.
+
+`reverse` is passed positionally rather than as a keyword: a keyword argument on
+a call the compiler cannot resolve forces the slow kwarg path (a `NamedTuple`
+allocation per call), which is precisely what this is trying to avoid.
+"""
+@inline apply_summaries!(::Tuple{}, model, data, X, s, i, t, reverse) = nothing
+@inline function apply_summaries!(summaries::Tuple, model, data, X, s, i, t, reverse)
+    first(summaries)(model, data, X, s, i, t; reverse=reverse)
+    return apply_summaries!(Base.tail(summaries), model, data, X, s, i, t, reverse)
 end

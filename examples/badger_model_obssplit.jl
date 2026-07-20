@@ -193,14 +193,21 @@ end
 ## ---------------------------------------------------------------------------
 
 """
-    badger_data_obssplit(dir; brock_changepoint=BROCK_CHANGEPOINT)
+    badger_data_obssplit(dir; brock_changepoint=BROCK_CHANGEPOINT,
+                         trans_mat=badger_transitions())
 
 Same model and same fast `rest_contribution` coupling as
 [`badger_data_reststotal`](@ref), but with the factored observation process, so
 the observation likelihood can be split between `@addlogprob!` and the conjugate
 `etas` block.
+
+`trans_mat` defaults to the standard Siler-survival transitions; pass
+`badger_transitions_gompertz()` (badger_model_gompertz.jl) to fit the C++'s
+Gompertz-Makeham survival instead. Only the survival function differs; infection
+and progression are shared.
 """
-function badger_data_obssplit(dir; brock_changepoint=BROCK_CHANGEPOINT)
+function badger_data_obssplit(dir; brock_changepoint=BROCK_CHANGEPOINT,
+                              trans_mat=badger_transitions())
     b = badger_data_reststotal(dir; brock_changepoint=brock_changepoint)
     d = b.raw
 
@@ -225,7 +232,7 @@ function badger_data_obssplit(dir; brock_changepoint=BROCK_CHANGEPOINT)
     data = epidemic_data(;
         n_individuals=d.n_individuals,
         n_timepoints=d.n_timepoints,
-        trans_mat=badger_transitions(),
+        trans_mat=trans_mat,
         starting_state=badger_starting_state,
         observation_process=badger_observations_split,   # full product, for iFFBS
         aggregates=aggregates,

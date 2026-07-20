@@ -5,6 +5,31 @@
 # sweeps, TIMED. Latent X is dropped from output (`buffer` mode) so memory stays
 # flat — the earlier chain-retaining run exhausted RAM at ~15 GB.
 #
+# ---------------------------------------------------------------------------
+# 2026-07-20: THE MODEL CHANGED. Runs from before this date are INVALID.
+# ---------------------------------------------------------------------------
+# The observation likelihood was missing from the log density. `epidemic_loglik`
+# covers only the starting state and the transitions; `observation_process` is
+# used solely by the iFFBS forward filter and never entered `@addlogprob!`. So
+# thetas/rhos/phis received NO likelihood information and were effectively drawn
+# from their Beta(1,1) priors — verified by halving all of them and seeing the
+# log density change by exactly 0.000e+00.
+#
+# The fit script now adds `epidemic_obs_loglik(...)` alongside the transition
+# term. `etas` stays a conjugate Gibbs block (the test factor is provably
+# independent of it, so nothing is double-counted).
+#
+# Cost of the fix: ~14% per sweep (3.222 -> 3.663 s/sweep measured on an 8-thread
+# laptop), NOT ~3x, because the observation term uses the allocation-free
+# `observation_weight` path (gradient 0.226 -> 0.075 s; 18 MB -> 16 bytes/call).
+#
+# Blocking: ONE HMC block for all 61 continuous parameters. Splitting the test
+# parameters into their own block — mirroring the C++ reference's
+# grad_/gradThetasRhos split — was measured 23% SLOWER (4.527 vs 3.663 s/sweep),
+# because PracticalBayes evaluates the whole model body per block, so two blocks
+# means two full primal evaluations AND two L=30 leapfrog trajectories.
+# See perf_gap_log.md for the full benchmark table.
+#
 # Installs everything into a throwaway project (a temp depot-local env), pulling
 # the two unregistered packages straight from GitHub at the exact commits this
 # script was written against, so the run is reproducible and uses the latest code.
@@ -35,6 +60,8 @@
 #   BADGER_OUT           output dir for chain + timing + log       (default ./badger_out)
 #   BADGER_X_SAVE        "buffer" | "disk" | "chain"              (default "buffer")
 #   BADGER_X_FLUSH       if X_SAVE=disk, sweeps per flushed file   (default 500)
+#   BADGER_ET_REV        EpidemicTrajectories git rev             (default "master")
+#   BADGER_PB_REV        PracticalBayes git rev                   (default: pinned SHA)
 # =============================================================================
 
 using Pkg
@@ -85,10 +112,15 @@ end
 @info "Logging to" LOG_PATH
 
 # --- Pinned versions: the exact commits pushed for this run ------------------
+# A pinned commit hash cannot be written into the same commit that creates it, so
+# EPITRAJ_REV defaults to the branch name and is overridable. Set BADGER_ET_REV
+# to a specific SHA to reproduce an exact past run; leave it unset to take the
+# current tip of master (what you want when running the latest work).
 const PRACTICALBAYES_URL = "https://github.com/EvoArt/PracticalBayes.git"
-const PRACTICALBAYES_REV = "21b0576377893ad50608e0c3da1372b118a54dce"
+const PRACTICALBAYES_REV = get(ENV, "BADGER_PB_REV",
+                               "21b0576377893ad50608e0c3da1372b118a54dce")
 const EPITRAJ_URL        = "https://github.com/EvoArt/EpidemicTrajectories.git"
-const EPITRAJ_REV        = "e2eba6343c6febd6b6c63fd008b60d8946b62856"
+const EPITRAJ_REV        = get(ENV, "BADGER_ET_REV", "master")
 
 # --- Install into a fresh temp project so nothing on the server is disturbed --
 const PROJECT_DIR = mktempdir(; prefix = "badger_run_")

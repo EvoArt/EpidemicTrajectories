@@ -56,6 +56,6 @@ export make_neighbor_logprob_from_transitions
 export iffbs!, iffbs_individual!, forward_filter, backward_sample!
 
 # What a model spec generates
-export epidemic_simulator, epidemic_loglik, epidemic_latent_sampler
+export epidemic_simulator, epidemic_loglik, epidemic_obs_loglik, epidemic_latent_sampler
 
 end # module EpidemicTrajectories

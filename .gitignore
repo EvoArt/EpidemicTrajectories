@@ -16,3 +16,5 @@ Manifest.toml
 _*.jl
 examples/_*.jl
 smoke_err.txt
+# Cygwin/Git-Bash crash artifacts
+*.stackdump

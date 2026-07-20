@@ -1,0 +1,362 @@
+# Fitting the badger bovine-TB model with PracticalBayes, using:
+#   * the `rest_contribution` power-user coupling term (badger_model_reststotal.jl,
+#     the O(n_states)-per-lookup running-total shape — the package's fastest
+#     iFFBS sweep as of 2026-07-19), and
+#   * a FIXED-epsilon HMC kernel (AdvancedHMC's `HMC`, not `NUTS`) for the
+#     continuous parameters, with per-parameter step sizes copied verbatim from
+#     badger_ref/run_base_exp.jl's `model` tuple (4th element per entry), and
+#     L=30 leapfrog steps — matching that reference run's `HMCSampler(L=30)`
+#     exactly. No step-size/mass adaptation (the reference's HMCSampler has
+#     none either); n_adapts=0.
+#
+#     AdvancedHMC's `HMC(ϵ, L)` only accepts a SCALAR ϵ, but per-parameter step
+#     sizes are reproduced exactly via the mass matrix instead: the leapfrog
+#     position update is `θ += ϵ .* (M⁻¹ .* r)` with momentum refreshed as
+#     `r ~ N(0, M)`. Fixing the scalar `ϵ = 1` and setting the diagonal
+#     `M⁻¹_i = eps_i^2` (`eps_i` = the reference's per-parameter step size)
+#     reproduces the reference's unit-mass, per-parameter-ϵ leapfrog step for
+#     step exactly (verified: identical trajectories under matched random
+#     draws) — no monkey-patching of AdvancedHMC internals needed.
+#
+# Conjugate Gibbs (etas, nu) and iFFBS (X) blocks are unchanged from badger_fit.jl.
+#
+# AD backend: `AutoPolyesterForwardDiff()`, matching badger_ref/run_base_exp.jl's
+# own `backend = AutoPolyesterForwardDiff(; chunksize=nothing, tag=nothing)` —
+# threaded chunked ForwardDiff, rather than PracticalBayes's plain-ForwardDiff
+# default.
+#
+# Run (detached): times a 100-sweep run, then immediately launches a 500-sweep
+# run in the same process.
+#   julia --project=examples examples/badger_fit_reststotal_hmc.jl
+# Env:  BADGER_BURN / BADGER_SEED / BADGER_OUT
+
+using EpidemicTrajectories
+using PracticalBayes
+using Distributions
+using Random
+using AdvancedHMC: HMC, Leapfrog, DiagEuclideanMetric
+using ADTypes: AutoPolyesterForwardDiff
+using PolyesterForwardDiff: PolyesterForwardDiff
+import AbstractMCMC
+using StableRNGs: StableRNG
+using Statistics: mean, std
+using Dates
+using JLD2: @save
+
+const ADTYPE = AutoPolyesterForwardDiff(; chunksize=nothing, tag=nothing)
+
+include(joinpath(@__DIR__, "badger_model_reststotal.jl"))
+
+# The badger CSVs (RData2). Defaults to the in-repo dev location, but override
+# with BADGER_DATA_DIR when running somewhere the repo's `badger_ref/` isn't
+# present (e.g. a server that has its own copy of RData2). Only RData2 is needed
+# — `load_badger_data` reads nothing from WPbadgerData.
+const DATA_DIR = get(ENV, "BADGER_DATA_DIR", joinpath(@__DIR__, "..", "badger_ref", "RData2"))
+
+b = badger_data_reststotal(DATA_DIR)
+data, raw = b.data, b.raw
+const G = raw.n_groups
+const NT = raw.n_tests
+const NS = raw.n_seasons
+const NNU = raw.n_nu_times
+
+println("Badger base model (reststotal coupling): ", data.n_individuals, " badgers x ",
+        data.n_timepoints, " timepoints x ", G, " groups, ", NT, " tests")
+println("Brock changepoint fixed at t=", BROCK_CHANGEPOINT, " (not inferred)")
+
+loglik = epidemic_loglik(data)
+latent! = epidemic_latent_sampler(data)
+
+## ---------------------------------------------------------------------------
+## The latent trajectory
+## ---------------------------------------------------------------------------
+
+struct TrajectoryLatent <: Distributions.DiscreteMatrixDistribution
+    n_time::Int
+    n_ind::Int
+end
+Base.size(d::TrajectoryLatent) = (d.n_time, d.n_ind)
+Distributions.logpdf(::TrajectoryLatent, X::AbstractMatrix) = 0.0
+Distributions.rand(rng::AbstractRNG, d::TrajectoryLatent) = fill(1, d.n_time, d.n_ind)
+
+_pars(c) = (; tau=c.values.tau, alpha=c.values.alpha, lambda=c.values.lambda,
+            beta=c.values.beta, q=c.values.q,
+            a1=c.values.a1, b1=c.values.b1, a2=c.values.a2, b2=c.values.b2,
+            c1=c.values.c1,
+            thetas=c.values.thetas, rhos=c.values.rhos, phis=c.values.phis,
+            etas=c.values.etas, nu=c.values.nu)
+
+struct iFFBSKernel <: PracticalBayes.AbstractLatentKernel
+    latent!::Function
+end
+PracticalBayes.latent_step(rng, k::iFFBSKernel, block_names, c::PracticalBayes.ModelConditional) = begin
+    X = copy(c.values.X)
+    k.latent!(rng, _pars(c), X)
+    (; X=X)
+end
+
+## ---------------------------------------------------------------------------
+## Conjugate updates (identical to badger_fit.jl)
+## ---------------------------------------------------------------------------
+
+struct EtaKernel <: PracticalBayes.AbstractLatentKernel
+    a::Float64
+    b::Float64
+end
+function PracticalBayes.latent_step(rng, k::EtaKernel, block_names, c::PracticalBayes.ModelConditional)
+    X = c.values.X
+    etas = zeros(Float64, NS)
+    for s in 1:NS
+        caught = 0
+        available = 0
+        for t in 1:data.n_timepoints
+            data.season[t] == s || continue
+            for i in 1:data.n_individuals
+                g = data.social_group[i, t]
+                (g > 0 && data.capt_effort[g, t] == 1) || continue
+                X[t, i] == 4 && continue                  # dead: not available
+                available += 1
+                caught += data.capture[t, i] == 1
+            end
+        end
+        etas[s] = rand(rng, Beta(k.a + caught, k.b + max(available - caught, 0)))
+    end
+    (; etas=etas)
+end
+
+struct NuKernel <: PracticalBayes.AbstractLatentKernel
+    hp::Vector{Float64}
+end
+function PracticalBayes.latent_step(rng, k::NuKernel, block_names, c::PracticalBayes.ModelConditional)
+    X = c.values.X
+    nu = Matrix{Float64}(undef, NNU, 2)     # columns: nuE, nuI
+    for (idx, nt) in enumerate(data.nu_times)
+        counts = zeros(Int, 3)
+        for i in 1:data.n_individuals
+            start_time = data.sampling_period[i][1]
+            (start_time == nt && data.birth_time[i] < start_time) || continue
+            s = X[nt, i]
+            s <= 3 && (counts[s] += 1)
+        end
+        p = rand(rng, Dirichlet(counts .+ k.hp))
+        nu[idx, 1], nu[idx, 2] = p[2], p[3]
+    end
+    (; nu=nu)
+end
+
+struct NuSimplex <: Distributions.DiscreteMatrixDistribution
+    n_nu::Int
+    hp::Vector{Float64}
+end
+Base.size(d::NuSimplex) = (d.n_nu, 2)
+Distributions.logpdf(::NuSimplex, nu::AbstractMatrix) = 0.0
+function Distributions.rand(rng::AbstractRNG, d::NuSimplex)
+    nu = Matrix{Float64}(undef, d.n_nu, 2)
+    for i in 1:d.n_nu
+        p = rand(rng, Dirichlet(d.hp))
+        nu[i, 1], nu[i, 2] = p[2], p[3]
+    end
+    nu
+end
+
+## ---------------------------------------------------------------------------
+## The model — priors exactly as the reference's base model
+## ---------------------------------------------------------------------------
+
+@model function badger_base(data, n_time, n_ind, n_groups, n_tests, n_seasons, n_nu, loglik_fn)
+    tau ~ Exponential(10.0)                          # progression scale
+    alpha ~ PracticalBayes.filldist(Exponential(1.0), n_groups)   # per-group external FOI
+    lambda ~ Exponential(1.0)
+    beta ~ Exponential(1.0)
+    q ~ Beta(1, 1)                                   # density-dependence exponent
+
+    c1 ~ Exponential(1.0)                            # Siler
+    a1 ~ Exponential(1.0)
+    b1 ~ Exponential(1.0)
+    a2 ~ Exponential(1.0)
+    b2 ~ Exponential(1.0)
+
+    thetas ~ PracticalBayes.filldist(Beta(1, 1), n_tests)   # sensitivity
+    rhos ~ PracticalBayes.filldist(Beta(1, 1), n_tests)     # exposed-state discount
+    phis ~ PracticalBayes.filldist(Beta(1, 1), n_tests)     # specificity
+
+    etas ~ PracticalBayes.filldist(Beta(1, 1), n_seasons)
+    nu ~ NuSimplex(n_nu, [8.0, 1.0, 1.0])       # (nuE, nuI) per nu-time, on the simplex
+
+    X ~ TrajectoryLatent(n_time, n_ind)
+
+    pars = (; tau=tau, alpha=alpha, lambda=lambda, beta=beta, q=q,
+            a1=a1, b1=b1, a2=a2, b2=b2, c1=c1,
+            thetas=thetas, rhos=rhos, phis=phis,
+            etas=etas, nu=nu)
+    @addlogprob! loglik_fn(pars, data, X)
+end
+
+## ---------------------------------------------------------------------------
+## Fixed-epsilon HMC block, matching badger_ref/run_base_exp.jl's model tuple
+## ---------------------------------------------------------------------------
+#
+# run_base_exp.jl's `model` NamedTuple (4th element per entry = per-parameter
+# epsilon, on the SAME log/logit-unconstrained scale PracticalBayes's flat
+# vector uses — confirmed via badger_ref's get_transformations: log for
+# positive support (Exponential priors), logit for unit support (Beta
+# priors), i.e. exactly Bijectors' defaults):
+#
+#   progression_scale (tau) = 0.002        thetas = 0.005 (x NT)
+#   alpha              = 0.2  (x G)        rhos   = 0.005 (x NT)
+#   lambda             = 0.01              phis   = 0.005 (x NT)
+#   beta               = 0.05
+#   q                  = 0.05
+#   c1                 = 0.005
+#   a2 = b2 = a1 = b1  = 0.001
+#
+# Flat-vector order must match the block's `names` tuple below (PracticalBayes
+# lays out the flat vector in model-declaration order, restricted to the
+# block's own names): tau, alpha, lambda, beta, q, c1, a1, b1, a2, b2,
+# thetas, rhos, phis.
+const HMC_L = 30
+const HMC_EPS = vcat(
+    0.002,                  # tau
+    fill(0.2, G),           # alpha
+    0.01,                   # lambda
+    0.05,                   # beta
+    0.05,                   # q
+    0.005,                  # c1
+    0.001,                  # a1
+    0.001,                  # b1
+    0.001,                  # a2
+    0.001,                  # b2
+    fill(0.005, NT),         # thetas
+    fill(0.005, NT),         # rhos
+    fill(0.005, NT),         # phis
+)
+
+# AdvancedHMC's `HMC(ϵ, L)` only accepts a SCALAR ϵ. Per-parameter step sizes
+# are instead reproduced through the (fixed, un-adapted) diagonal mass matrix:
+# the leapfrog position update is `θ += ϵ .* (M⁻¹ .* r)` with momentum
+# refreshed each step as `r ~ N(0, M)`. Fixing the scalar `ϵ = 1` and setting
+# `M⁻¹_i = eps_i^2` reproduces the reference's unit-mass, per-parameter-ϵ
+# leapfrog step exactly (verified empirically: identical trajectories under
+# matched random draws). `HMC`'s `make_adaptor` returns `NoAdaptation()`
+# unconditionally, so this mass matrix — like the reference's — is never
+# touched after construction.
+function make_hmc_block(eps_vec, L)
+    HMC(L; integrator=Leapfrog(1.0), metric=DiagEuclideanMetric(eps_vec .^ 2))
+end
+
+## ---------------------------------------------------------------------------
+## Run
+## ---------------------------------------------------------------------------
+
+function run_badger_fit(n_sweeps; n_burn=0, seed=13)
+    m = badger_base(data, data.n_timepoints, data.n_individuals, G, NT, NS, NNU, loglik)
+
+    hmc_kernel = make_hmc_block(HMC_EPS, HMC_L)
+
+    spl = Gibbs(
+        (:tau, :alpha, :lambda, :beta, :q, :c1, :a1, :b1, :a2, :b2,
+         :thetas, :rhos, :phis) => hmc_kernel,
+        :etas => EtaKernel(1.0, 1.0),
+        :nu => NuKernel([1.0, 1.0, 1.0]),
+        :X => iFFBSKernel(latent!),
+    )
+
+    init0 = badger_initial_params(raw; rng=StableRNG(seed))
+    X0 = copy(raw.X_init)
+    init = (; X=X0, tau=init0.tau, alpha=init0.alpha, lambda=init0.lambda,
+            beta=init0.beta, q=init0.q, c1=init0.c1, a1=init0.a1, b1=init0.b1,
+            a2=init0.a2, b2=init0.b2, thetas=init0.thetas, rhos=init0.rhos,
+            phis=init0.phis, etas=init0.etas,
+            nu=hcat(init0.nuE, init0.nuI))
+
+    reset_aggregates!(data)
+    apply_derived_summaries!(init0, data, X0)
+
+    # The latent trajectory X is a 161×2384 Int matrix — ~3 MB PER SWEEP. Keeping
+    # every draw in the chain is what exhausted memory on the earlier 5000-sweep
+    # run (~15 GB projected). `save_states` keeps X live for conditioning (so
+    # iFFBS/the likelihood are unaffected) but controls what happens to the OUTPUT.
+    # `BADGER_X_SAVE` selects the mode:
+    #   "disk"   (default): stream X to `X_iters_x_to_y.jld2` chunks every
+    #            `BADGER_X_FLUSH` sweeps; recover later with `read_states(x_path)`.
+    #   "buffer"          : drop X from the output entirely (no chain, no disk) —
+    #            the memory-lightest option, for when only the parameters matter.
+    #   "chain"           : the old behaviour (retain every X in the chain) — will
+    #            blow up memory at large n_sweeps; here only for A/B timing.
+    outdir = get(ENV, "BADGER_OUT", joinpath(@__DIR__, "outputs"))
+    mkpath(outdir)
+    x_path = joinpath(outdir, "badger-reststotal-hmc-X-$(n_sweeps)iter.jld2")
+    x_flush_every = parse(Int, get(ENV, "BADGER_X_FLUSH", "500"))
+    x_save = get(ENV, "BADGER_X_SAVE", "disk")
+    x_disp = x_save == "disk"   ? (x_path, x_flush_every) :
+             x_save == "buffer" ? :buffer :
+             x_save == "chain"  ? :chain :
+             error("BADGER_X_SAVE must be \"disk\", \"buffer\", or \"chain\", got \"$x_save\"")
+
+    println("\nGibbs: fixed-eps HMC(L=$HMC_L, per-param eps matching run_base_exp.jl) ",
+            "(13 continuous) + conjugate(etas, nu) + iFFBS(X, reststotal coupling)")
+    println("adtype=", ADTYPE)
+    println("sweeps=$n_sweeps burn=$n_burn seed=$seed")
+    println("X save mode: $x_save", x_save == "disk" ? " (every $x_flush_every sweeps -> $x_path)" : "")
+    t0 = time()
+    chn = AbstractMCMC.sample(StableRNG(seed), m, spl, n_sweeps;
+                              init=init, adtype=ADTYPE, n_adapts=0, discard_initial=n_burn,
+                              save_states=(X=x_disp,))
+    elapsed = time() - t0
+    println("done in ", round(elapsed / 60, digits=1), " min (", round(elapsed, digits=1), " s)")
+    chn, elapsed
+end
+
+function report(chn)
+    println("\n=== Posterior summary ===")
+    for name in (:tau, :lambda, :beta, :q, :c1, :a1, :b1, :a2, :b2)
+        v = vec(chn[name])
+        println(rpad(string(name), 8), " mean ", rpad(round(mean(v); digits=5), 10),
+                " sd ", round(std(v); digits=5))
+    end
+    for name in (:thetas, :rhos, :phis, :etas)
+        mm = chn[name]
+        println(rpad(string(name), 8), " means ", round.(vec(mean(reduce(hcat, mm); dims=2)); digits=3))
+    end
+end
+
+function save_run(chn, elapsed, n_sweeps; tag)
+    outdir = get(ENV, "BADGER_OUT", joinpath(@__DIR__, "outputs"))
+    mkpath(outdir)
+    stamp = Dates.format(now(), "yyyymmdd-HHMMSS")
+    path = joinpath(outdir, "badger-reststotal-hmc-$tag-$stamp.jld2")
+    @save path chn elapsed
+    timing_path = joinpath(outdir, "badger-reststotal-hmc-$tag-$stamp-timing.txt")
+    open(timing_path, "w") do io
+        println(io, "n_sweeps=", n_sweeps)
+        println(io, "elapsed_seconds=", elapsed)
+        println(io, "elapsed_minutes=", elapsed / 60)
+        println(io, "elapsed_hours=", elapsed / 3600)
+    end
+    println("saved: ", path)
+    println("timing: ", timing_path)
+    path
+end
+
+if get(ENV, "BADGER_RUN", "1") == "1"
+    n_burn = parse(Int, get(ENV, "BADGER_BURN", "0"))
+    seed = parse(Int, get(ENV, "BADGER_SEED", "13"))
+    warmup_sweeps = parse(Int, get(ENV, "BADGER_WARMUP_SWEEPS", "100"))
+    main_sweeps = parse(Int, get(ENV, "BADGER_MAIN_SWEEPS", "500"))
+
+    println("\n########## Timed run: $warmup_sweeps sweeps ##########")
+    chn_w, elapsed_w = run_badger_fit(warmup_sweeps; n_burn=n_burn, seed=seed)
+    report(chn_w)
+    save_run(chn_w, elapsed_w, warmup_sweeps; tag="$(warmup_sweeps)iter")
+    println("$warmup_sweeps-sweep timing: ", round(elapsed_w, digits=1), " s (",
+            round(elapsed_w / 60, digits=2), " min); ",
+            round(elapsed_w / warmup_sweeps, digits=3), " s/sweep")
+
+    println("\n########## Main run: $main_sweeps sweeps ##########")
+    chn_m, elapsed_m = run_badger_fit(main_sweeps; n_burn=n_burn, seed=seed)
+    report(chn_m)
+    save_run(chn_m, elapsed_m, main_sweeps; tag="$(main_sweeps)iter")
+    println("$main_sweeps-sweep timing: ", round(elapsed_m, digits=1), " s (",
+            round(elapsed_m / 60, digits=2), " min); ",
+            round(elapsed_m / main_sweeps, digits=3), " s/sweep")
+end

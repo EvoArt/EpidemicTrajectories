@@ -18,7 +18,7 @@ using EpidemicTrajectories
 using PracticalBayes
 using Distributions
 using Random
-using AdvancedHMC: NUTS
+using AdvancedHMC: HMC, NUTS
 import AbstractMCMC
 using StableRNGs: StableRNG
 using Statistics: mean, std
@@ -199,8 +199,8 @@ end
 ## Run
 ## ---------------------------------------------------------------------------
 
-function run_badger_fit(; n_sweeps=parse(Int, get(ENV, "BADGER_SWEEPS", "10000")),
-                          n_burn=parse(Int, get(ENV, "BADGER_BURN", "2000")),
+function run_badger_fit(; n_sweeps=parse(Int, get(ENV, "BADGER_SWEEPS", "1000")),
+                          n_burn=parse(Int, get(ENV, "BADGER_BURN", "1000")),
                           n_adapts=parse(Int, get(ENV, "BADGER_ADAPTS", "1000")),
                           seed=parse(Int, get(ENV, "BADGER_SEED", "13")))
     m = badger_base(data, data.n_timepoints, data.n_individuals, G, NT, NS, NNU, loglik)

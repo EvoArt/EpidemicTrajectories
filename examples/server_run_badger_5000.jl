@@ -234,7 +234,8 @@ const BADGER_MODEL = lowercase(get(ENV, "BADGER_MODEL", "siler"))
 const FIT_SCRIPT =
     BADGER_MODEL == "siler"    ? "badger_fit_reststotal_hmc.jl" :
     BADGER_MODEL == "gompertz" ? "badger_fit_gompertz_hmc.jl"   :
-    error("BADGER_MODEL must be \"siler\" or \"gompertz\", got \"$BADGER_MODEL\"")
+    BADGER_MODEL == "gompertz_fixed" ? "badger_fit_gompertz_fixed_hmc.jl" :  # + mean-time tau (progression bug fix)
+    error("BADGER_MODEL must be \"siler\", \"gompertz\" or \"gompertz_fixed\", got \"$BADGER_MODEL\"")
 @info "Fitting model" BADGER_MODEL FIT_SCRIPT
 include(joinpath(EXAMPLES, FIT_SCRIPT))
 

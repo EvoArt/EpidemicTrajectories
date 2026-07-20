@@ -36,6 +36,22 @@ as three reusable, **PPL-agnostic** pure functions, generated from a model spec:
 3. a **latent-state sampler** — currently iFFBS, but this is one instance of a
    pluggable role, not the whole story (see "Why this package exists" above).
 
+**The likelihood comes in TWO halves and you almost always need both.**
+`epidemic_loglik` covers the starting state and the transitions ONLY.
+`epidemic_obs_loglik` covers the observation process. Neither includes the other:
+
+```julia
+@addlogprob! loglik(pars, data, X) + obs_loglik(pars, data, X)
+```
+
+**Omitting the second term is a silent modelling bug**, and it shipped in the
+badger example for months: `observation_process` is used only by the iFFBS
+forward filter, never by `epidemic_loglik`, so every observation parameter
+(sensitivities, specificities, capture probabilities) received NO likelihood
+information and was effectively sampled from its prior. Halving all four changed
+the log density by exactly `0.000e+00`. If a model's observation parameters look
+prior-like, check this first.
+
 **It has no dependency on any probabilistic-programming framework.** That is
 deliberate: the likelihood drops into a PracticalBayes (or Turing) `@addlogprob!`,
 and the latent sampler is exactly what a PracticalBayes `AbstractLatentKernel`'s
@@ -171,6 +187,18 @@ two changes, neither of which was the one that looked obvious:
    `rate_fns` is a `Tuple` (not `Vector{Function}`) iterated by recursion in
    `_fill_rates!`. Any of these regressing costs ~5x and is invisible to inference
    checks — `data.age` reports `Matrix{Int64}` either way. **Benchmark, don't infer.**
+
+   **A `Tuple` of callables is necessary but NOT sufficient — it must be iterated
+   by RECURSION, never by `for`.** `for f in tup` over a tuple of DISTINCT
+   closure types infers the loop variable as their union and dispatches at
+   runtime on every call. This bit twice: `rate_fns` (fixed by `_fill_rates!`)
+   and, two years of comments later, `derived_summaries` — whose docstring
+   *claimed* the Tuple made the hot loop specialise, while the two loops in
+   `iffbs_individual!` were **42.7% of a sweep's self time**, both flagged
+   `gc? Y dispatch? Y`. Fixed by `apply_summaries!` (2.6x on the sweep, 717 ->
+   199 MB). Call summaries ONLY through `apply_summaries!`. Note it takes
+   `reverse` POSITIONALLY: a keyword on a call the compiler cannot resolve forces
+   the kwarg path and allocates a NamedTuple per call.
 2. **`coupled_transitions`.** The user declares which of a neighbour's transitions
    the focal can influence; the sampler skips neighbours whose realised move it
    cannot affect. Exact (verified to 1e-13), and worth ~10x on the badger model.
@@ -180,6 +208,21 @@ transition out of any coupled source state, not just the named one. Probabilitie
 out of a state sum to one, so influencing `S -> E` necessarily influences `S -> S`.
 Masking only the named transition changes the sampler's weights by ~0.25. There are
 tests for both properties; do not "simplify" them away.
+
+**Fewer allocations is NOT automatically faster.** Allocation and type stability
+are independent axes and trading one for the other can lose. Concretely: the
+iFFBS scratch buffer was first held in `const Ref{Any}`, which cut allocation
+199 -> 139 MB and made the sweep **26% SLOWER** (0.435 -> 0.510 s) — `Any` made
+every buffer access dynamic, reintroducing the exact instability being fixed one
+function over. The typed `struct FilterScratch` gave 0.375 s / 85.6 MB. **Measure
+each change on its own**: had this been bundled with the `apply_summaries!` fix,
+that 2.6x would have masked the regression entirely.
+
+**`_FILTER_SCRATCH` is a module-level `Ref` and is therefore NOT thread-safe.**
+That is currently sound because `iffbs!` is single-threaded *by construction* —
+individuals within a sweep share mutable aggregate state through the
+reverse -> refilter -> reapply invariant, so they cannot be run in parallel at
+all. If iFFBS is ever parallelised, this must become per-task state first.
 
 3. **`coupling_trans_mat`.** A separate `TransitionSpec` for the coupling term ONLY
    (`epidemic_data(...; coupling_trans_mat=trans_mat)`, default unchanged). The
@@ -196,7 +239,64 @@ tests for both properties; do not "simplify" them away.
    (see next point) the FOI arithmetic was never the dominant cost inside the
    coupling loop.
 
-**Where the remaining gap is (2026-07-17 investigation, not yet acted on).**
+4. **`observation_weight`.** `epidemic_obs_loglik(data; observation_process=...,
+   observation_weight=...)`. The vector-returning `observation_process` is what the
+   SAMPLER needs (the forward filter reads every state's weight); the LIKELIHOOD
+   needs exactly one entry, `w[X[t,i]]`. Going via the vector allocates an array
+   per `(i,t)` — on badgers **18 MB and ~187k arrays of Duals per call**, making
+   the observation term more expensive than the entire transition likelihood.
+   `observation_weight(model, data, X, i, t, s)` returns that one entry.
+   Measured: primal 0.0148 -> 0.0017 s, **18 MB -> 16 bytes**; gradient 0.226 ->
+   0.075 s (3.0x). This is the same trap `transition_prob` already avoids for
+   transitions — and it was reintroduced in the observation term the day it was
+   written, so watch for it in any new per-`(i,t)` package function.
+
+5. **`observation_process` as a keyword to `epidemic_obs_loglik`.** The seam that
+   lets a user keep SOME observation parameters conjugate. The package cannot
+   split an observation process itself — it is one opaque function returning a
+   weight vector, and nothing in it says which factor belongs to which parameter.
+   A user whose process factorises multiplicatively (`w = capture x tests`) gives
+   the PRODUCT to `epidemic_data` (so the filter sees everything) and only the
+   non-conjugate FACTOR here. Because the weights multiply, the log-likelihood is
+   a sum of the factors' contributions, so dropping one drops exactly its term.
+   **Keeping a factor in both this likelihood and a conjugate block double-counts
+   it** — verify independence (the badger test factor moves by 0.000e+00 when
+   `etas` changes).
+
+**GOTCHA: an observation factor's element type depends on the BLOCKING, not the
+model.** The same function is called with `Float64` when its parameters are
+sampled conjugately and with `ForwardDiff.Dual` when they sit in an HMC block.
+Allocate weight vectors as `ones(eltype(model.some_param), n_states)`, never
+`ones(Float64, ...)` — the latter works until someone moves that parameter into
+HMC, then throws on the write.
+
+**Blocking: the C++ reference's two-gradient split does NOT port to a PPL.**
+`badger_ref` splits epidemic vs test parameters into two hand-written gradient
+functions over disjoint data. Mirroring that as two Gibbs HMC blocks measured
+**23% SLOWER** (4.527 vs 3.663 s/sweep), because PracticalBayes evaluates the
+WHOLE model body for every block — two blocks means two full primal evaluations
+AND two independent leapfrog trajectories, which costs far more than the saved AD
+partials. Use ONE HMC block with conjugate blocks alongside it.
+
+**Match the reference's EXPECTED trajectory length, not its nominal `L`.**
+`badger_ref` draws `intL = ceil(runif(0,1)*L)` with `L=30` — uniform on {1..30},
+mean 15.5, so ~16.5 gradients per HMC step. A fixed `HMC(L=30)` does 30, i.e.
+1.82x the work for no added fidelity. We use a fixed `L=15`. A randomised-L
+kernel IS buildable from AdvancedHMC's public API (`Trajectory`, `HMCKernel`,
+`FixedNSteps` are exported; `HMCSampler` passes any kernel through — `HMC`/`NUTS`
+are just conveniences over that), but `nsteps(τ)` takes no RNG and is called
+TWICE per transition, so keeping the simulated and reported `L` in agreement
+needs mutable state in the sampler plus an assumption that `refresh` fires once
+per transition — an ordering dependency that would fail SILENTLY. Rejected on
+those grounds; revisit only if a fixed L shows resonance.
+
+**Where the remaining gap is (2026-07-17 investigation).** *[SUPERSEDED — kept
+for the reasoning. The O(n_states)-per-lookup running total described below was
+built on 2026-07-19 as the `rest_contribution` keyword, and on 2026-07-20 the
+iFFBS sweep went 1.129 -> 0.375 s via the two fixes above. iFFBS is now ~17% of a
+badger sweep and is NOT the bottleneck; the gradient is ~83%. Read the following
+as history, not as a to-do.]*
+
 After (1)-(3), badger iFFBS is ~1.5-2x the reference's own sweep. Profiling BOTH
 sides (not just ours) settled why:
 
@@ -247,6 +347,20 @@ sign-off before starting.
 - `@transitions` supports only `:individual` style.
 - No convenience layer yet for common/simple choices (see above) — every model
   currently declares its own aggregates and rates.
+- **`epidemic_obs_loglik` has no scalar path of its own.** It takes a
+  user-supplied `observation_weight`; the package cannot derive one from a
+  vector-returning `observation_process`. A model that supplies only the vector
+  form silently gets the slow (allocating) path — correct, ~3x slower gradient.
+- **The badger example's `phis` is in the HMC block; the reference samples it
+  CONJUGATELY** (`CheckSensSpec_` + `rbeta` over susceptible-state test results).
+  Not wrong — `phis` is informed either way now that the test factor is in the
+  likelihood — but an exact conjugate draw would be cheaper and mix better. The
+  derivation is in `MCMCiFFBS_.cpp:849-868` if anyone wants to build the kernel.
+- **ESS has never been measured for any of the blocking choices.** The
+  conjugate-vs-HMC decision for `etas`/`nu` was made on mixing grounds
+  (a conjugate draw is an exact independent sample; an HMC step is correlated
+  with an unadapted step size), NOT on data — wall-clock was a wash between them.
+  If blocking is revisited, measure ESS/second, not s/sweep.
 
 ## Roadmap (per user direction)
 
@@ -261,6 +375,27 @@ sign-off before starting.
   infection-link, R_i) reusing the same rate functions — the badger
   `residuals.jl` layer, computed post-hoc from `(model, X, data)` draws.
 - Later: continuous-time / spatial, ODE-fit extension.
+
+**Where the performance headroom is now (2026-07-20).** The badger sweep is
+~2.0 s: iFFBS ~17%, HMC/AD ~83%. Profiling the gradient shows **zero runtime
+dispatch and essentially zero GC** — it is raw floating-point arithmetic, so the
+type-stability and allocation classes of win are exhausted there. Two structural
+levers remain, both needing sign-off:
+
+1. **A hand-derived gradient seam** (the big one). The C++ reference computes
+   ∂logpost analytically in ONE scalar pass (`grad_.cpp`, with closed-form Siler
+   derivatives); we run 61-partial forward-mode AD. Shape it like
+   `rest_contribution`: an optional seam for a user-supplied gradient, defaulting
+   to AD. The package would stay ignorant of what the gradient means.
+2. **Keeping rates in log-space** (~8-10%, smaller). `badger_infection` returns
+   `-expm1(-foi)` and the likelihood then takes `log` of it; the reference never
+   leaves log space (`logProbStoSgivenSorE = -alpha - beta*inf`). Would need the
+   package to accept log-rates (e.g. a flag on `TransitionSpec`).
+
+*Do not chase the `log`/`exp` share on the strength of a single profile:* one
+noisy run put `log` at 25% total and a cleaner re-run put `_log` at 1.6% self.
+Sort by TOTAL to choose what to change, by SELF to read one line, and re-run
+before acting.
 
 ## Conventions
 

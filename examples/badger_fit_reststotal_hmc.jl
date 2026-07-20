@@ -341,8 +341,19 @@ end
 if get(ENV, "BADGER_RUN", "1") == "1"
     n_burn = parse(Int, get(ENV, "BADGER_BURN", "0"))
     seed = parse(Int, get(ENV, "BADGER_SEED", "13"))
+    compile_sweeps = parse(Int, get(ENV, "BADGER_COMPILE_SWEEPS", "1"))
     warmup_sweeps = parse(Int, get(ENV, "BADGER_WARMUP_SWEEPS", "100"))
     main_sweeps = parse(Int, get(ENV, "BADGER_MAIN_SWEEPS", "500"))
+
+    # An untimed throwaway pass first: the FIRST sweep JIT-compiles the whole
+    # pipeline (loglik, gradient, iFFBS, kernels), which would otherwise land
+    # entirely inside the 100-sweep timing and inflate its per-sweep figure. We
+    # discard this pass's result — it exists only to pay the compilation cost
+    # before the clock starts. Set BADGER_COMPILE_SWEEPS=0 to skip it.
+    if compile_sweeps > 0
+        println("\n########## Compile pass (untimed): $compile_sweeps sweep(s) ##########")
+        run_badger_fit(compile_sweeps; n_burn=0, seed=seed)
+    end
 
     println("\n########## Timed run: $warmup_sweeps sweeps ##########")
     chn_w, elapsed_w = run_badger_fit(warmup_sweeps; n_burn=n_burn, seed=seed)

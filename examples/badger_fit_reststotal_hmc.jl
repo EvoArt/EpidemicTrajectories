@@ -39,7 +39,7 @@ using ADTypes: AutoPolyesterForwardDiff
 using PolyesterForwardDiff: PolyesterForwardDiff
 import AbstractMCMC
 using StableRNGs: StableRNG
-using Statistics: mean, std
+using Statistics: mean, std, median
 using Dates
 using JLD2: @save
 
@@ -443,6 +443,19 @@ function report(chn)
         mm = chn[name]
         println(rpad(string(name), 8), " means ", round.(vec(mean(reduce(hcat, mm); dims=2)); digits=3))
     end
+    # alpha is a per-group vector (length G) sampled in the HMC block. Printing
+    # all G means would flood the log, so summarise the posterior means across
+    # groups and list the first few — the full per-group draws are always in the
+    # chain (`chn[:alpha]`); X_SAVE only governs the latent X, not the parameters.
+    # NOTE: alpha and lambda are non-identifiable up to a shared scale — the group
+    # FOI is `lambda * alpha[g]`, so only the product enters the likelihood. If
+    # lambda and the alpha means drift together across the chain, that is the
+    # scale ridge, not poor mixing (the reference has the same structure).
+    am = vec(mean(reduce(hcat, chn[:alpha]); dims=2))
+    println(rpad("alpha", 8), " ", length(am), " groups; posterior means: ",
+            "min ", round(minimum(am); digits=4), " median ", round(median(am); digits=4),
+            " max ", round(maximum(am); digits=4))
+    println(rpad("", 8), " first 5: ", round.(am[1:min(5, length(am))]; digits=4))
 end
 
 function save_run(chn, elapsed, n_sweeps; tag)

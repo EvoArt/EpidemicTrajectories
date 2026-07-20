@@ -324,6 +324,27 @@ function run_badger_fit(n_sweeps; n_burn=0, seed=13)
 
     hmc_kernel = make_hmc_block(HMC_EPS, HMC_L)
 
+    # BLOCKING: ONE HMC block for all 61 continuous parameters, plus conjugate
+    # Gibbs for etas/nu and iFFBS for X. Benchmarked (50 sweeps each,
+    # examples/bench_obs_variants.jl, results in perf_gap_log.md):
+    #
+    #   this (1 HMC block, conjugate etas)     3.682 s/sweep
+    #   everything in HMC incl. etas           3.663 s/sweep
+    #   test params in a SECOND HMC block      4.527 s/sweep   <- 23% SLOWER
+    #
+    # Do NOT split the test parameters into their own block. It mirrors the C++
+    # reference's grad_/gradThetasRhos split, but that only works there because
+    # those are hand-written gradients over disjoint data. PracticalBayes
+    # evaluates the WHOLE model body for every block, so two HMC blocks means two
+    # full primal evaluations AND two independent L=30 leapfrog trajectories —
+    # which costs far more than the saved AD partials (61 -> 43 + 18).
+    #
+    # Keeping etas/nu CONJUGATE rather than folding them into HMC is a wash on
+    # wall-clock (3.682 vs 3.663 s/sweep, within noise) but should mix better: a
+    # conjugate draw is an exact independent sample from the correct conditional,
+    # whereas an HMC step is a correlated move with a hand-set, unadapted step
+    # size. Wall-clock is the wrong metric for that choice; ESS per second would
+    # be the right one, and has NOT been measured.
     spl = Gibbs(
         (:tau, :alpha, :lambda, :beta, :q, :c1, :a1, :b1, :a2, :b2,
          :thetas, :rhos, :phis) => hmc_kernel,

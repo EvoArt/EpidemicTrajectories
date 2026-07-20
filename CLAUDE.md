@@ -387,10 +387,27 @@ levers remain, both needing sign-off:
    derivatives); we run 61-partial forward-mode AD. Shape it like
    `rest_contribution`: an optional seam for a user-supplied gradient, defaulting
    to AD. The package would stay ignorant of what the gradient means.
-2. **Keeping rates in log-space** (~8-10%, smaller). `badger_infection` returns
-   `-expm1(-foi)` and the likelihood then takes `log` of it; the reference never
-   leaves log space (`logProbStoSgivenSorE = -alpha - beta*inf`). Would need the
-   package to accept log-rates (e.g. a flag on `TransitionSpec`).
+2. ~~**Keeping rates in log-space**~~ — **INVESTIGATED AND DROPPED.** The claim
+   that "the reference never leaves log space" was WRONG. `badger_ref` stores
+   `logProbStoSgivenSorE` as a log but **exponentiates it back on every use**
+   (`iFFBS_fixedPars.cpp:112-113`), because its forward filter is genuinely in
+   probability space: `predProb`/`filtProb` are sums of products (lines 118-124),
+   which have no log-space form without logsumexp — and it runs a full logsumexp
+   per `(i,t)` in `normTransProbRest` on top. The reference's actual win there is
+   caching the group-level FOI per `(g,t)` instead of per `(i,t)`, which we
+   already have via `rest_contribution`.
+
+   Log-space rates would help the LIKELIHOOD (`log(P)` becomes a subtraction) but
+   hurt the FILTER, which needs real probabilities: `transition_matrix_at!` gives
+   the self-transition the leftover mass as `P[a,a] = 1 - rowsum`, and that
+   subtraction has NO log-space equivalent — it becomes `log1mexp(logsumexp(...))`
+   per row per `(i,t)`, trading one subtraction for two transcendentals. So the
+   rates get `exp`'d back on read exactly as the reference does, and the
+   transcendentals move from the gradient into the filter roughly one-for-one.
+   Filter is ~17% of a sweep vs gradient ~83%, so it is still directionally
+   positive, but far below the ~8-10% first estimated — and it would require user
+   rate functions to return logs, an API change touching `@transitions`, the
+   clamping logic, and every existing model. Not worth the blast radius.
 
 *Do not chase the `log`/`exp` share on the strength of a single profile:* one
 noisy run put `log` at 25% total and a cleaner re-run put `_log` at 1.6% self.

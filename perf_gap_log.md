@@ -832,3 +832,46 @@ old kernel taxing other blocks) is plausible but unproven by this data.
 Lesson, and it is the same one CLAUDE.md already records: **one measurement of a
 noisy quantity is not a result.** The etas number (270x) survives only because
 the effect is far larger than the noise. Everything else needs a quiet machine.
+
+### 2026-07-20 (late) — log-space rates: investigated, DROPPED
+
+The user asked what log-space would give up, "bearing in mind the cpp code
+exponentiates to get probs in iFFBS". Correct, and it kills the idea.
+
+**The earlier claim in this log — "the C++ never leaves log space" — was wrong.**
+It stores `logProbStoSgivenSorE` as a log but exponentiates it back on EVERY use:
+
+    iFFBS_fixedPars.cpp:112   p00 = (1-prDeath)*exp(logProbStoSgivenSorE(g-1, tt-1+t0));
+    iFFBS_fixedPars.cpp:113   p01 = (1-prDeath)*exp(logProbStoEgivenSorE(g-1, tt-1+t0));
+
+because its forward filter is genuinely in probability space —
+`predProb`/`filtProb` are sums of products (lines 118-124), which have no
+log-space form without logsumexp. It also runs a full logsumexp per `(i,t)` in
+`normTransProbRest`. So the reference pays `exp` ~187k times per sweep in the
+filter; it is not avoiding transcendentals there at all.
+
+What the reference actually gains by storing logs is caching the GROUP-level FOI
+per `(g,t)` rather than recomputing per `(i,t)` — an optimisation we already have
+via `rest_contribution`.
+
+**What log-space would cost us.** The likelihood would gain (`log(P)` becomes a
+subtraction, removing an exp+log round-trip per `(i,t)` in the gradient). But the
+filter would lose:
+
+1. `transition_matrix_at!` gives the self-transition the leftover mass,
+   `P[a,a] = 1 - rowsum`. **No log-space equivalent** — it becomes
+   `log1mexp(logsumexp(...))` per row per `(i,t)`: one subtraction for two
+   transcendentals.
+2. `pred = trans' * probs` is a sum of products; log-space needs logsumexp per
+   entry.
+3. So rates get exponentiated back on read anyway, exactly as the C++ does.
+
+Net: transcendentals move from the gradient into the filter roughly one-for-one.
+Filter ~17% of a sweep vs gradient ~83%, so still directionally positive, but far
+below the ~8-10% first estimated — and it needs user rate functions to return
+logs, an API change touching `@transitions`, the clamping logic, and every
+existing model. **Dropped.**
+
+This leaves the hand-derived gradient seam as the ONLY substantial lever
+remaining, which matches where the C++'s real advantage lies (`grad_.cpp` is one
+analytic scalar pass; we run 61-partial forward-mode AD).

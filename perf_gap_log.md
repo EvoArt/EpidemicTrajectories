@@ -875,3 +875,50 @@ existing model. **Dropped.**
 This leaves the hand-derived gradient seam as the ONLY substantial lever
 remaining, which matches where the C++'s real advantage lies (`grad_.cpp` is one
 analytic scalar pass; we run 61-partial forward-mode AD).
+
+### 2026-07-20 (late) — Gompertz-Makeham variant to match the C++ (NOT run_base_exp)
+
+Some parameter estimates didn't match the C++. Two causes, both found by reading
+the C++ source rather than guessing:
+
+1. **Survival function.** Our default badger model uses SILER (a1,b1,a2,b2,c1),
+   copied from `run_base_exp.jl`'s `probs`. The C++ (`classic rcpp`) uses
+   GOMPERTZ-MAKEHAM (a2,b2,c1) — `a1`/`b1` appear in ZERO .cpp files.
+   `TrProbSurvive_.cpp` is `exp(-c1 + (a2/b2)*(exp(b2*(age-1)) - exp(b2*age)))`,
+   i.e. our siler_survival without the `(a1/b1)*earlyLife` term. The extra a1/b1
+   let signal that belongs in c1/a2/b2 leak into them.
+
+2. **Priors.** Full audit vs the C++ (runmodel.R hp_* + logPost_HMC.cpp, each a
+   log-density in unconstrained space):
+
+   | param | C++ | our old (Siler) | matched? |
+   |---|---|---|---|
+   | tau | Gamma(1, scale=100) = Exp(100) | Exp(10) | NO |
+   | nu | Dirichlet(1,1,1) | Dirichlet(8,1,1) | NO |
+   | a1,b1 | absent | Exp(1) | NO (extra params) |
+   | alpha,lambda,beta,c1,a2,b2 | Exp(1) | Exp(1) | yes |
+   | q,thetas,rhos,phis,etas | Beta(1,1) | Beta(1,1) | yes |
+
+   The Exp(10)/Dir(8,1,1) values came from run_base_exp.jl's INIT draws, not the
+   C++ priors. (Note: Distributions.Exponential takes the SCALE, so Exp(100) has
+   mean 100, matching Gamma(shape=1, scale=100).)
+
+**New files, old Siler code untouched** (user's instruction):
+- `examples/badger_model_gompertz.jl` — `gompertz_makeham_survival` (matches
+  TrProbSurvive_.cpp) + `badger_transitions_gompertz()`.
+- `examples/badger_fit_gompertz_hmc.jl` — fit script: Gompertz transitions, a1/b1
+  removed everywhere (model, HMC block, eps vector, init, report), tau ~ Exp(100),
+  nu ~ Dir(1,1,1). Outputs named `badger-gompertz-*` so they don't clobber the
+  Siler run's.
+- `examples/badger_model_obssplit.jl` — ONE-line backward-compatible change: a
+  `trans_mat` keyword (defaults to `badger_transitions()`, so the Siler script is
+  unaffected — regression-checked).
+
+Deliberate choice: kept run_base_exp.jl's per-parameter HMC step sizes (minus
+a1/b1), NOT the C++'s epsilons. Step size is a sampler-efficiency knob, not part
+of the target posterior; changing survival AND step sizes at once would confound
+any comparison.
+
+Both scripts smoke-tested (EXIT=0, sensible report). The 3-sweep estimates are
+near-identical because both start from the same init and 3 sweeps barely move —
+the real test is a converged run comparing Gompertz c1/a2/b2 against the C++'s.

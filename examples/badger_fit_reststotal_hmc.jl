@@ -46,6 +46,7 @@ using JLD2: @save
 const ADTYPE = AutoPolyesterForwardDiff(; chunksize=nothing, tag=nothing)
 
 include(joinpath(@__DIR__, "badger_model_reststotal.jl"))
+include(joinpath(@__DIR__, "badger_model_obssplit.jl"))
 
 # The badger CSVs (RData2). Defaults to the in-repo dev location, but override
 # with BADGER_DATA_DIR when running somewhere the repo's `badger_ref/` isn't
@@ -53,7 +54,11 @@ include(joinpath(@__DIR__, "badger_model_reststotal.jl"))
 # — `load_badger_data` reads nothing from WPbadgerData.
 const DATA_DIR = get(ENV, "BADGER_DATA_DIR", joinpath(@__DIR__, "..", "badger_ref", "RData2"))
 
-b = badger_data_reststotal(DATA_DIR)
+# The FACTORED observation process (capture x tests). Identical weights to
+# badger_data_reststotal's — verified to 1.1e-16 over 186,850 cells — but split
+# into two factors so the test factor alone can go into the likelihood while
+# `etas` stays in its conjugate Gibbs block. See badger_model_obssplit.jl.
+b = badger_data_obssplit(DATA_DIR)
 data, raw = b.data, b.raw
 const G = raw.n_groups
 const NT = raw.n_tests
@@ -64,7 +69,32 @@ println("Badger base model (reststotal coupling): ", data.n_individuals, " badge
         data.n_timepoints, " timepoints x ", G, " groups, ", NT, " tests")
 println("Brock changepoint fixed at t=", BROCK_CHANGEPOINT, " (not inferred)")
 
+# TWO likelihood terms, summed in @addlogprob!:
+#
+#  * `loglik`     — starting state + transitions (epidemic/survival parameters).
+#  * `obs_loglik` — the TEST factor of the observation process, which is what
+#    informs thetas/rhos/phis.
+#
+# The observation term was MISSING before 2026-07-20. Without it, halving
+# thetas/rhos/phis/etas changed the log density by exactly 0.000e+00 — those
+# parameters were sampled from their priors, since `observation_process` is
+# otherwise used only by the iFFBS forward filter and never enters the
+# differentiated density. That was a model bug, not a design choice.
+#
+# `observation_weight` supplies the ALLOCATION-FREE scalar path: the likelihood
+# needs one entry of the weight vector, and going via the vector allocates ~18 MB
+# per call (~187k arrays of Duals). Measured: gradient 0.226 -> 0.075 s (3.0x),
+# i.e. this is what makes the correct model cost ~14% more than the wrong one
+# rather than ~3x more. Verified exact vs the vector path (0.000e+00 across all
+# 747,400 (i,t,s) entries).
+#
+# `etas` is NOT in this term — it stays a conjugate Gibbs block, and the test
+# factor is provably independent of it (checked: 0.000e+00), so nothing is
+# double-counted.
 loglik = epidemic_loglik(data)
+obs_loglik = epidemic_obs_loglik(data;
+                                 observation_process=badger_obs_tests,
+                                 observation_weight=badger_obs_tests_weight)
 latent! = epidemic_latent_sampler(data)
 
 ## ---------------------------------------------------------------------------
@@ -86,8 +116,13 @@ _pars(c) = (; tau=c.values.tau, alpha=c.values.alpha, lambda=c.values.lambda,
             thetas=c.values.thetas, rhos=c.values.rhos, phis=c.values.phis,
             etas=c.values.etas, nu=c.values.nu)
 
-struct iFFBSKernel <: PracticalBayes.AbstractLatentKernel
-    latent!::Function
+# `latent!` is type-PARAMETERISED, not declared `::Function`. An abstract field
+# type boxes the closure and makes every `k.latent!(...)` a dynamic dispatch;
+# parameterising it keeps the call concrete. (The call happens once per sweep, so
+# unlike the EtaKernel fix this is not a hot-loop win — but it costs nothing and
+# removes an inference barrier at the entry to the 26%-of-sweep iFFBS block.)
+struct iFFBSKernel{F} <: PracticalBayes.AbstractLatentKernel
+    latent!::F
 end
 PracticalBayes.latent_step(rng, k::iFFBSKernel, block_names, c::PracticalBayes.ModelConditional) = begin
     X = copy(c.values.X)
@@ -99,42 +134,73 @@ end
 ## Conjugate updates (identical to badger_fit.jl)
 ## ---------------------------------------------------------------------------
 
-struct EtaKernel <: PracticalBayes.AbstractLatentKernel
+# The kernel CARRIES its data in a type-parameterised field rather than reading
+# the module-level `data` binding. That binding (line ~57, `data, raw = b.data,
+# b.raw`) is a non-const global, so every `data.season[t]` / `data.social_group[i,t]`
+# inside the kernel body was a dynamic lookup returning `Any` — the whole
+# ~1.5M-iteration count loop ran untyped.
+#
+# Measured (examples/bench_eta_overhead.jl), same loop, globals vs argument:
+#     globals   : 0.6114 s, 164,109,040 bytes allocated
+#     arguments : 0.0032 s,         224 bytes allocated   -> 189x
+#
+# This block was 11.7% of a sweep (0.541 s) purely from that. Exactly the trap
+# CLAUDE.md's performance section describes — `data.season` reports the right
+# type either way, so only a benchmark reveals it.
+#
+# The count loop is ALSO restructured: season is a function of `t` alone, so one
+# pass over (i, t) can bucket straight into caught[season[t]] / available[season[t]],
+# instead of running NS full passes that each discard ~75% of the grid via
+# `season[t] == s || continue`. Verified bit-identical counts
+# (caught=[1579,3466,4463,2599], available=[7856,8802,8667,8156]) — see
+# examples/bench_eta.jl.
+struct EtaKernel{D} <: PracticalBayes.AbstractLatentKernel
     a::Float64
     b::Float64
+    data::D
 end
+EtaKernel(a, b) = EtaKernel(a, b, data)   # convenience: capture the current `data`
+
 function PracticalBayes.latent_step(rng, k::EtaKernel, block_names, c::PracticalBayes.ModelConditional)
     X = c.values.X
+    d = k.data                      # typed field, not the untyped global
+    caught = zeros(Int, NS)
+    available = zeros(Int, NS)
+    @inbounds for i in 1:d.n_individuals
+        for t in 1:d.n_timepoints
+            g = d.social_group[i, t]
+            (g > 0 && d.capt_effort[g, t] == 1) || continue
+            X[t, i] == 4 && continue                  # dead: not available
+            s = d.season[t]
+            available[s] += 1
+            caught[s] += d.capture[t, i] == 1
+        end
+    end
     etas = zeros(Float64, NS)
     for s in 1:NS
-        caught = 0
-        available = 0
-        for t in 1:data.n_timepoints
-            data.season[t] == s || continue
-            for i in 1:data.n_individuals
-                g = data.social_group[i, t]
-                (g > 0 && data.capt_effort[g, t] == 1) || continue
-                X[t, i] == 4 && continue                  # dead: not available
-                available += 1
-                caught += data.capture[t, i] == 1
-            end
-        end
-        etas[s] = rand(rng, Beta(k.a + caught, k.b + max(available - caught, 0)))
+        etas[s] = rand(rng, Beta(k.a + caught[s], k.b + max(available[s] - caught[s], 0)))
     end
     (; etas=etas)
 end
 
-struct NuKernel <: PracticalBayes.AbstractLatentKernel
+# Carries `data` in a typed field for the same reason as EtaKernel above — this
+# loop is far smaller (nu_times x n_individuals, not NS x T x N), so it measured
+# only 0.022 s/sweep, but the untyped-global defect is identical and the fix free.
+struct NuKernel{D} <: PracticalBayes.AbstractLatentKernel
     hp::Vector{Float64}
+    data::D
 end
+NuKernel(hp) = NuKernel(hp, data)
+
 function PracticalBayes.latent_step(rng, k::NuKernel, block_names, c::PracticalBayes.ModelConditional)
     X = c.values.X
+    d = k.data
     nu = Matrix{Float64}(undef, NNU, 2)     # columns: nuE, nuI
-    for (idx, nt) in enumerate(data.nu_times)
+    for (idx, nt) in enumerate(d.nu_times)
         counts = zeros(Int, 3)
-        for i in 1:data.n_individuals
-            start_time = data.sampling_period[i][1]
-            (start_time == nt && data.birth_time[i] < start_time) || continue
+        @inbounds for i in 1:d.n_individuals
+            start_time = d.sampling_period[i][1]
+            (start_time == nt && d.birth_time[i] < start_time) || continue
             s = X[nt, i]
             s <= 3 && (counts[s] += 1)
         end
@@ -163,7 +229,7 @@ end
 ## The model — priors exactly as the reference's base model
 ## ---------------------------------------------------------------------------
 
-@model function badger_base(data, n_time, n_ind, n_groups, n_tests, n_seasons, n_nu, loglik_fn)
+@model function badger_base(data, n_time, n_ind, n_groups, n_tests, n_seasons, n_nu, loglik_fn, obs_loglik_fn)
     tau ~ Exponential(10.0)                          # progression scale
     alpha ~ PracticalBayes.filldist(Exponential(1.0), n_groups)   # per-group external FOI
     lambda ~ Exponential(1.0)
@@ -189,7 +255,11 @@ end
             a1=a1, b1=b1, a2=a2, b2=b2, c1=c1,
             thetas=thetas, rhos=rhos, phis=phis,
             etas=etas, nu=nu)
-    @addlogprob! loglik_fn(pars, data, X)
+    # Transitions + observations. The second term is what informs
+    # thetas/rhos/phis; without it they are sampled from their priors (verified:
+    # halving them changed the density by exactly 0.000e+00). See the comment at
+    # the top of this file.
+    @addlogprob! loglik_fn(pars, data, X) + obs_loglik_fn(pars, data, X)
 end
 
 ## ---------------------------------------------------------------------------
@@ -249,7 +319,8 @@ end
 ## ---------------------------------------------------------------------------
 
 function run_badger_fit(n_sweeps; n_burn=0, seed=13)
-    m = badger_base(data, data.n_timepoints, data.n_individuals, G, NT, NS, NNU, loglik)
+    m = badger_base(data, data.n_timepoints, data.n_individuals, G, NT, NS, NNU,
+                    loglik, obs_loglik)
 
     hmc_kernel = make_hmc_block(HMC_EPS, HMC_L)
 

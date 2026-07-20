@@ -97,6 +97,9 @@
 #   BADGER_ET_REV        EpidemicTrajectories git rev             (default "master")
 #   BADGER_PB_REV        PracticalBayes git rev                   (default: pinned SHA)
 #   BADGER_HMC_L         leapfrog steps per HMC move              (default 15)
+#   BADGER_MODEL         "siler" | "gompertz"                     (default "siler")
+#                        gompertz matches the C++ (classic rcpp): Gompertz-Makeham
+#                        survival, no a1/b1, tau~Exp(100), nu~Dir(1,1,1).
 # =============================================================================
 
 using Pkg
@@ -221,6 +224,18 @@ ENV["BADGER_RUN"] = "1"
 @info "Run configuration" data=RDATA2 warmup_sweeps=ENV["BADGER_WARMUP_SWEEPS"] main_sweeps=ENV["BADGER_MAIN_SWEEPS"] seed=ENV["BADGER_SEED"] x_save=ENV["BADGER_X_SAVE"] out=ENV["BADGER_OUT"] threads=Threads.nthreads()
 
 # --- Run the fit script (it prints timing and writes the chain + timing file) -
-include(joinpath(EXAMPLES, "badger_fit_reststotal_hmc.jl"))
+# BADGER_MODEL selects which survival model to fit:
+#   "siler"    (default) — Siler survival (a1,b1,a2,b2,c1), matches run_base_exp.jl
+#   "gompertz"           — Gompertz-Makeham (a2,b2,c1), matches the C++ classic rcpp,
+#                          with C++-matched priors (tau~Exp(100), nu~Dir(1,1,1)).
+# The two write DIFFERENTLY-NAMED outputs (badger-reststotal-* vs badger-gompertz-*),
+# so both can live in the same BADGER_OUT without clobbering each other.
+const BADGER_MODEL = lowercase(get(ENV, "BADGER_MODEL", "siler"))
+const FIT_SCRIPT =
+    BADGER_MODEL == "siler"    ? "badger_fit_reststotal_hmc.jl" :
+    BADGER_MODEL == "gompertz" ? "badger_fit_gompertz_hmc.jl"   :
+    error("BADGER_MODEL must be \"siler\" or \"gompertz\", got \"$BADGER_MODEL\"")
+@info "Fitting model" BADGER_MODEL FIT_SCRIPT
+include(joinpath(EXAMPLES, FIT_SCRIPT))
 
 @info "Done. Chain and timing written under" ENV["BADGER_OUT"]

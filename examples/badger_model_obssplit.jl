@@ -207,7 +207,8 @@ Gompertz-Makeham survival instead. Only the survival function differs; infection
 and progression are shared.
 """
 function badger_data_obssplit(dir; brock_changepoint=BROCK_CHANGEPOINT,
-                              trans_mat=badger_transitions())
+                              trans_mat=badger_transitions(),
+                              observation_process=badger_observations_split)
     b = badger_data_reststotal(dir; brock_changepoint=brock_changepoint)
     d = b.raw
 
@@ -234,7 +235,7 @@ function badger_data_obssplit(dir; brock_changepoint=BROCK_CHANGEPOINT,
         n_timepoints=d.n_timepoints,
         trans_mat=trans_mat,
         starting_state=badger_starting_state,
-        observation_process=badger_observations_split,   # full product, for iFFBS
+        observation_process=observation_process,          # full product, for iFFBS
         aggregates=aggregates,
         derived_summaries=(_summary_n_infectious_rt, _summary_n_alive_rt,
                            _summary_nSE_rt, _summary_nSS_rt),

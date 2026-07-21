@@ -97,9 +97,17 @@
 #   BADGER_ET_REV        EpidemicTrajectories git rev             (default "master")
 #   BADGER_PB_REV        PracticalBayes git rev                   (default: pinned SHA)
 #   BADGER_HMC_L         leapfrog steps per HMC move              (default 15)
-#   BADGER_MODEL         "siler" | "gompertz"                     (default "siler")
-#                        gompertz matches the C++ (classic rcpp): Gompertz-Makeham
-#                        survival, no a1/b1, tau~Exp(100), nu~Dir(1,1,1).
+#   BADGER_MODEL   "siler" | "gompertz" | "gompertz_fixed"        (default "siler")
+#                  gompertz: Gompertz-Makeham survival, no a1/b1, tau~Exp(100),
+#                            nu~Dir(1,1,1) — matches the C++ classic rcpp.
+#                  gompertz_fixed: gompertz PLUS the correctness fixes found
+#                            2026-07-21 — mean-time progression (tau=1/rate, was
+#                            inverted), survival at destination time (off-by-one),
+#                            death forbidden before LAST capture via the
+#                            observation, and entry conditioning (likelihood loops
+#                            from FIRST capture). This is the one that holds the
+#                            E:I equilibrium near the data (I ~70% of Xinit vs 35%
+#                            before). USE THIS ONE.
 # =============================================================================
 
 using Pkg

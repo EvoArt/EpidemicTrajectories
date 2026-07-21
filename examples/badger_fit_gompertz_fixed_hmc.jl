@@ -79,7 +79,14 @@ const DATA_DIR = get(ENV, "BADGER_DATA_DIR", joinpath(@__DIR__, "..", "badger_re
 # badger_data_reststotal's — verified to 1.1e-16 over 186,850 cells — but split
 # into two factors so the test factor alone can go into the likelihood while
 # `etas` stays in its conjugate Gibbs block. See badger_model_obssplit.jl.
-b = badger_data_obssplit(DATA_DIR; trans_mat=badger_transitions_meantime_gompertz())
+# The FILTER's observation process is `badger_observations_deathban`: the capture
+# factor gives state D weight 0 for every t up to last_capture (forbidding death
+# before last capture in the iFFBS trajectory), times the test factor. Survival is
+# pure Gompertz; the death constraints live in the observation (filter, last
+# capture) and the likelihood entry bound (first capture) instead.
+b = badger_data_obssplit(DATA_DIR;
+                         trans_mat=badger_transitions_meantime_gompertz(),
+                         observation_process=badger_observations_deathban)
 data, raw = b.data, b.raw
 const G = raw.n_groups
 const NT = raw.n_tests
@@ -112,7 +119,14 @@ println("Brock changepoint fixed at t=", BROCK_CHANGEPOINT, " (not inferred)")
 # `etas` is NOT in this term — it stays a conjugate Gibbs block, and the test
 # factor is provably independent of it (checked: 0.000e+00), so nothing is
 # double-counted.
-loglik = epidemic_loglik(data)
+# ENTRY CONDITIONING: the transition likelihood starts each individual's sum at
+# its FIRST capture (max with the sampling-period start), so transitions before
+# entry contribute nothing — matching the reference's `j >= firstCaptureTimes`
+# gate (posterior.jl:149-150). Since survival is now pure Gompertz, this is what
+# makes the likelihood CHARGE real survival over [first_capture .. last_capture]
+# (which we previously credited for free), rather than forbidding pre-entry death
+# via the survival function.
+loglik = epidemic_loglik(data; entry_time=raw.first_capture_time)
 obs_loglik = epidemic_obs_loglik(data;
                                  observation_process=badger_obs_tests,
                                  observation_weight=badger_obs_tests_weight)

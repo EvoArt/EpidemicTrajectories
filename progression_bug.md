@@ -279,3 +279,22 @@ that our last_capture already covers -> log(1)=0). The fix that WOULD matter:
 make the LIKELIHOOD survival gate on FIRST capture (charge real survival in
 [first,last]) while the FILTER survival gates on LAST capture. These need to be
 DIFFERENT survival functions for the two roles.
+
+## Confirmation: c1 inflation = the survival-crediting bug (user spotted it)
+
+The pasted Gompertz summary had c1=6.99. That is the Makeham CONSTANT hazard:
+per-step survival exp(-6.99) ≈ 0.0009 — i.e. the fit says 99.9% of badgers die
+EVERY quarter at EVERY age. Physically absurd (badgers live years).
+
+This is the SMOKING GUN for the survival-crediting bug (fixed this session): with
+survival forced to 1 across the observed window, the likelihood saw ONLY death
+events (alive->D) and no survival events, so c1 inflated toward "everyone dies" —
+there was no survival to explain, only deaths. Charging real survival over
+[first_capture .. last_capture] (this session's fix) gives the likelihood ~186k
+survival events to pin c1 to a realistic ~0.01-0.05 (per-step survival ~0.95-0.99).
+
+Imputation window (user asked): we impute ONLY [start_sampling, end_sampling] per
+individual (iffbs.jl:224), and the loglik loops [max(first,entry) .. end-1] — both
+confined to the monitoring period, matching the reference. The post-monitoring
+tail is neither imputed nor in the transition loglik. This was ALREADY correct
+before this session; it was never the bug.

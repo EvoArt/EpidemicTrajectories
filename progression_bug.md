@@ -121,3 +121,35 @@ CAVEAT: 3-sweep smoke tests show scale, NOT convergence. Whether the fit now
 MATCHES the reference needs a converged run. The residual gap after the
 progression fix could be this off-by-one OR non-convergence OR a further
 discrepancy — a short run cannot distinguish them.
+
+---
+
+# CORRECTION + the REAL cause: iFFBS collapses the epidemic
+
+**The survival off-by-one was overclaimed.** A one-step age shift is ~0.01% per
+factor — it cannot drive tau to 42. The user was right to be skeptical (mean
+progression 42 seasons means most exposed badgers never become infectious, which
+no survival-indexing detail explains). The off-by-one is a real bug and worth
+fixing, but it is NOT the cause of the parameter divergence.
+
+**The real cause, measured (count E/I states before and after iFFBS):**
+
+    Xinit         E=4016  I=2728  | S->E=801  E->I=299  E->E=3212
+    after 5 iFFBS E=2015  I= 776  | S->E=368  E->I=138  E->E=1645
+
+Xinit's own E->I fraction is 299/(299+3212) ≈ 0.085 -> tau ≈ 11, right in the
+reference's ballpark. But our iFFBS DESTROYS infections: after 5 sweeps E halves
+and I drops to ~28% of its initial count. With few E and I states left, the
+likelihood forces tau up (few E->I events) and beta up (few I -> need high
+transmission). tau=42 and beta=2.4 are DOWNSTREAM of a latent trajectory that has
+lost most of its infections.
+
+So the bug is in the LATENT SAMPLER (forward filter / observation weights /
+coupling), not in the survival age or the progression convention (both of which
+are now correct). The iFFBS is systematically down-weighting E and I states and
+resampling them to S.
+
+STATUS: root cause localised to the iFFBS producing an infection-poor X.
+Progression fix (mean-time tau) and survival off-by-one are correct and should
+stay, but they are NOT sufficient — the trajectory collapse must be fixed for the
+epidemic parameters to match. Investigation ongoing.

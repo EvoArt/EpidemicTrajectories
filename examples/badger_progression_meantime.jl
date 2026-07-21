@@ -78,11 +78,24 @@ function gompertz_makeham_survival_tp1(model, data, i, t)
     tt = t + 1                                  # DESTINATION time of the t->t+1 move
     age = tt <= data.n_timepoints ? data.age[i, tt] : data.age[i, data.n_timepoints] + (tt - data.n_timepoints)
     age < 0 && return 1.0
+    # PURE Gompertz-Makeham survival — NO last-capture gate here (see below).
+    #
+    # The death constraints are handled where they belong, not by forcing survival
+    # to 1 (which credits free survival and biases c1/a2/b2):
+    #   * "no death before LAST capture" (the iFFBS trajectory constraint) is
+    #     imposed by the OBSERVATION process — `badger_obs_capture_deathban` gives
+    #     state D weight 0 for t <= last_capture, so the filter cannot place death
+    #     there. This matches the reference, which forces probDyingMat=0 (a filter
+    #     quantity) before lastCaptureTimes, NOT the survival used in the likelihood.
+    #   * "no death before FIRST capture" (the likelihood constraint) is imposed by
+    #     LOOPING the transition likelihood from first_capture (entry conditioning),
+    #     handled in badger_fit_gompertz_fixed_hmc.jl's likelihood call.
+    # So this survival is the real Gompertz everywhere, and the likelihood CHARGES
+    # it over [first_capture .. last_capture] — as posterior.jl does.
     a2, b2, c1 = model.a2, model.b2, model.c1
     y1 = b2 * (age - 1); y2 = b2 * age
     late = -exp(y1) * expm1(y2 - y1)
-    s = exp(-c1 + (a2 / b2) * late)
-    return tt <= data.last_capture_time[i] ? 1.0 : s
+    return exp(-c1 + (a2 / b2) * late)
 end
 
 # Gompertz-Makeham survival (t+1) + corrected mean-time progression — the fully
@@ -93,4 +106,42 @@ function badger_transitions_meantime_gompertz()
         S -> E = badger_infection
         E -> I = badger_progression_meantime
     end
+end
+
+## ---------------------------------------------------------------------------
+## Observation CAPTURE factor that forbids death before last capture (FILTER)
+## ---------------------------------------------------------------------------
+#
+# This replaces badger_obs_capture (badger_model_obssplit.jl) for the fixed model.
+# It is IDENTICAL except it gives state D weight 0 for EVERY t up to and including
+# last_capture_time — not just at capture times. A badger seen alive at some later
+# capture cannot have died before then, so the iFFBS filter must assign zero
+# probability to D across that whole window. This is the "no death before last
+# capture" constraint, imposed via the OBSERVATION (matching the reference's
+# probDyingMat=0 before lastCaptureTimes — a filter quantity), so the SURVIVAL
+# function stays pure Gompertz and the likelihood can charge real survival.
+#
+# Only the FILTER sees this factor (it is `data.observation_process`); the
+# likelihood uses the separate test factor, so this D-ban does not touch the
+# differentiated density.
+function badger_obs_capture_deathban(model, data, X, i, t)
+    w = ones(eltype(model.etas), data.n_states)
+    eta = model.etas[data.season[t]]
+    seen_alive = t <= data.last_capture_time[i]     # known alive up to last capture
+    if data.capture[t, i] == 0
+        w[1] = w[2] = w[3] = 1 - eta
+        # D allowed ONLY after last capture; before/at it the badger is known alive.
+        w[4] = seen_alive ? zero(eltype(w)) : one(eltype(w))
+    else
+        w[1] = w[2] = w[3] = eta
+        w[4] = zero(eltype(w))                       # seen at capture: not dead
+    end
+    w
+end
+
+# Full split observation process for the fixed model: death-banning capture factor
+# times the test factor. Given to epidemic_data as observation_process (FILTER).
+function badger_observations_deathban(model, data, X, i, t)
+    badger_obs_capture_deathban(model, data, X, i, t) .*
+        badger_obs_tests(model, data, X, i, t)
 end

@@ -144,12 +144,45 @@ function load_badger_data(dir; brock_changepoint=BROCK_CHANGEPOINT, known_sex_on
     last_capture_time = [findlast(==(1), @view capture[:, i]) for i in 1:m]
     last_capture_time = [lc === nothing ? 0 : lc for lc in last_capture_time]
 
+    # first capture time — the reference forbids death before this (survival=1,
+    # death=-Inf up to firstCaptureTimes). Falls back to birth_time when never
+    # captured, matching MCMCiFFBS_.jl:467-478.
+    first_capture_time = [findfirst(==(1), @view capture[:, i]) for i in 1:m]
+    first_capture_time = [fc === nothing ? max(birth_time[i], 1) : fc
+                          for (i, fc) in enumerate(first_capture_time)]
+
+    # ── captures after monitoring ─────────────────────────────────────────────
+    # `capturesAfterMonit` (V1=old id, V2=lastCaptTime) records badgers seen alive
+    # AFTER their monitoring period ended. The reference uses it two ways
+    # (MCMCiFFBS_.jl:480-493, posterior.jl:208-223):
+    #   1. EXTEND last_capture_time to the CAM time, so the iFFBS filter cannot
+    #      place death before a known-alive observation — this keeps E/I alive
+    #      longer and directly affects the equilibrium E:I balance.
+    #   2. ADD a survival-only likelihood term over the post-monitoring tail
+    #      (lastObsAlive .. lastCaptTime-1).
+    # We load it, keep-filter/renumber it, and extend last_capture_time here;
+    # the likelihood term itself is added by the fit script via @addlogprob!.
+    cam_raw = Matrix{Int}(rd("capturesAfterMonit.csv"))     # [row] = (old_id, lastCaptTime)
+    cam_rows = Tuple{Int,Int}[]
+    for r in 1:size(cam_raw, 1)
+        oid = cam_raw[r, 1]
+        (1 <= oid <= length(old_to_new) && old_to_new[oid] != 0) || continue
+        nid = old_to_new[oid]
+        tcap = cam_raw[r, 2]
+        push!(cam_rows, (nid, tcap))
+        # Extend: a badger caught at tcap was alive then, so death is impossible
+        # up to tcap. (max, not overwrite — its within-monitoring last capture may
+        # be later than a spurious CAM row, though normally CAM is strictly later.)
+        last_capture_time[nid] = max(last_capture_time[nid], tcap)
+    end
+
     season = make_season_vec(n_seasons, 1, maxt)
     sampling_period = [(start_period[i], end_period[i]) for i in 1:m]
 
     return (; n_individuals=m, n_timepoints=maxt, n_groups, n_tests, n_seasons,
             n_nu_times, X_init, social_group, age, capture, capt_effort, tests,
-            sampling_period, birth_time, last_capture_time, season, nu_times, sex, K, k)
+            sampling_period, birth_time, last_capture_time, first_capture_time,
+            captures_after_monit=cam_rows, season, nu_times, sex, K, k)
 end
 
 """

@@ -74,8 +74,22 @@ move to explain: nothing observes the individual, so the reference model (which
 this package matches) contributes no likelihood term there either. On the badger
 dataset the average window is under half the full 161 timepoints, so this roughly
 halves the per-gradient cost.
+
+## Entry conditioning: `entry_time`
+
+By default each individual's transition sum starts at its `sampling_period` first
+time. Pass `entry_time` — a `Vector{Int}` of per-individual entry times — to start
+individual `i`'s sum at `max(first_t, entry_time[i])` instead. This is how a model
+CONDITIONS ON ENTRY: transitions before the entry time (e.g. before an individual
+was first observed) contribute no likelihood, matching the reference's
+`j >= firstCaptureTimes` gate. When `entry_time === nothing` (the default), the
+behaviour is unchanged.
+
+The starting-state term is unchanged (it applies at the individual's own start,
+where the nu mixing is defined); only the transition loop's lower bound moves.
 """
-function epidemic_loglik(data::EpidemicData)
+function epidemic_loglik(data::EpidemicData; entry_time=nothing)
+    et = entry_time
     function loglik(model, data::EpidemicData, X)
         ll = zero(_param_eltype(model))
 
@@ -86,7 +100,8 @@ function epidemic_loglik(data::EpidemicData)
 
         for i in 1:data.n_individuals
             first_t, last_t = data.sampling_period[i]
-            for t in first_t:min(last_t, data.n_timepoints) - 1
+            lo = et === nothing ? first_t : max(first_t, et[i])
+            for t in lo:min(last_t, data.n_timepoints) - 1
                 # Only ONE entry of the transition matrix matters here: the move
                 # this individual actually made. `transition_prob` computes just
                 # that, rather than building the whole matrix per (i, t) — which

@@ -153,3 +153,129 @@ STATUS: root cause localised to the iFFBS producing an infection-poor X.
 Progression fix (mean-time tau) and survival off-by-one are correct and should
 stay, but they are NOT sufficient — the trajectory collapse must be fixed for the
 epidemic parameters to match. Investigation ongoing.
+
+## The collapse is STRUCTURAL (parameter-independent), and hits I specifically
+
+Ran 5 iFFBS sweeps at three parameter settings:
+
+    tau=15 beta=0.019: E=2015 I=776   (Xinit E=4016 I=2728)
+    tau= 3 beta=0.500: E=2025 I=348
+    tau= 3 beta=2.000: E=2727 I=257
+
+The I collapse happens at EVERY setting — cranking beta 100x makes it WORSE, not
+better. So it is not a parameter basin; it is structural. And it is SPECIFIC to
+I: at tau=3/beta=2, E recovers toward Xinit (2727 vs 4016) but I craters to 257.
+
+=> The forward filter / observation weights are systematically preventing badgers
+from STAYING in I. Next: inspect the I-row of the transition matrix and the
+observation weight vector at an I cell.
+
+## I-collapse: NOT a test-alignment or state-code bug
+
+Counts of Xinit I/E cells by test result:
+    I-cells: POS=374  NEG=677  no-test=1677   (64% of tested I are NEGATIVE)
+    E-cells: POS=1487 NEG=916  no-test=1613   (62% of tested E are POSITIVE)
+
+Positive tests cluster on E, not I. Checked: this is CORRECT, not a bug —
+runmodel.R builds Xinit by setting the positive-test time to state 3L (=E in the
+C++'s codes {S=0,E=3,I=1,D=9}), then "E becomes I some quarters later". Our loader
+maps codes correctly (REF_STATE_CODE = 0->1,3->2,1->3,9->4), so E lands on E.
+Test times: C++ applies a test at TestTimes=T to corrector time T; ours reads
+tests[t] at t. Same alignment. Observation weights are correct arithmetic (a
+negative-testing badger genuinely looks S).
+
+So the reference reconstructs a healthy epidemic FROM this same Xinit, but our
+iFFBS collapses I regardless of parameters. Transition matrix is correct
+(P[I,:]=[0,0,1,0], I absorbing). Remaining suspect: the forward/backward
+recursion or the coupling term — how E->I probability propagates through the
+filter. Investigation continues there.
+
+## Audit vs Julia reference (semi-markov_src.jl) — findings
+
+CONFIRMED MATCHING (read line-by-line):
+- Forward-filter indexing: ref `compute_individual_transition_probs(tt-1+t0)` ->
+  predProb[tt+t0] (move src->dest); ours transition_matrix_at!(t-1)->probs[j].
+  Same.
+- First step: ref filtProb[t0] = corrector·predProb·transProbRest normalized;
+  ours base·obs·rest normalized. Same.
+- Backward: ref P(state|next) = p[state->next]·filtProb[t]/predProb[t+1,next];
+  ours cond[a]=probs[j,a]·trans[a,bnext] normalized. Same (predProb is the norm const).
+- Space: both work in probability space in the filter (corrector·predProb·rest,
+  sums of products), log-space only for the coupling normalization. Ours matches
+  (logw then exp). No prob/logprob confusion found.
+- Transition matrix correct: E-row P[E,:]=[0, 0.9355, 0.0645, 0] (E->I = 1-exp(-1/15)
+  exactly), I-row [0,0,1,0] (absorbing). No leak.
+- Freshness: aggregates seeded at run start (reset+apply), maintained by
+  reverse/reapply; X flows unbroken through the iFFBS kernel copy. Consistent.
+
+STILL DIVERGENT: I collapses despite all per-cell quantities being correct. This
+is emergent over the trajectory: E->I is only 0.0645/step, and 64% of I-cells have
+NEGATIVE tests (pull toward S), so the forward filter puts little mass on I. May be
+correct given the model — but the reference does NOT collapse, so a difference
+remains in how I mass is propagated/retained. Prime remaining suspects: the
+coupling total (logProbRestTotal running-total vs our nSE/nSS decomposition) under
+the FULL global X, and the numerical normalization (ref uses logsumexp; ours
+subtract-max-then-exp — check for a regime where ours underflows where ref doesn't).
+
+## SEI trajectories over 100 sweeps — it is an EQUILIBRIUM problem, not an iFFBS sink
+
+Tracked S/E/I/D per sweep (examples/track_sei.jl). BOTH models PLATEAU by ~sweep
+10 (not sink to zero) — so the iFFBS is NOT buggy; it faithfully samples a
+stationary trajectory. The problem is WHERE the stationary point sits:
+
+               E        I     E:I ratio
+  Xinit(data)  4016   2728    1.47
+  Siler(100)    455   2853    0.16   <- E collapses, I fine (E->I too FAST)
+  Gompertz(100)3690    958    3.85   <- I decays, E fine (E->I too SLOW)
+
+The two models sit on OPPOSITE sides of the data's E:I ratio, by ~10x and ~2.6x.
+This is governed by the E->I progression rate vs the death rates — a model
+EQUILIBRIUM, not a filter bug. Consistent with the tau-convention:
+  Siler  1-exp(-tau), tau small -> high E->I -> E drains to I -> E collapses.
+  Gompertz 1-exp(-1/tau), tau=15 -> E->I=0.065 -> E stuck -> I decays.
+
+FEEDBACK LOOP: HMC co-fits tau from the sampled X. Gompertz stationary I=958 ->
+likelihood sees few I -> infers slow progression (tau->42) -> even fewer I. The
+sampler + likelihood reinforce a wrong basin. Neither model anchors E:I to the
+Xinit/data ratio the way the reference presumably does.
+
+Totals conserved (186850 both, all sweeps) — no counting/window bug. D shifts are
+just states redistributing.
+
+OPEN: why does the reference hold E:I near the data? Candidates: (a) the entry
+survival + captures-after-monit terms (cpp_model_discrepancies.md §1,§4) that we
+lack change the effective E/I evidence; (b) a difference in how the reference's
+starting-state / nu mixing seeds E vs I; (c) the progression prior/init anchoring.
+Next: compare the reference's actual equilibrium E:I (run it, or read its saved
+output) — we may be chasing a match to numbers the reference ALSO doesn't hold.
+
+## CAM + capture-timing audit — the real difference is survival CREDITING
+
+User's key distinction: iFFBS forbids death before LAST capture; the likelihood
+forbids death before FIRST capture. Verified:
+- first_capture <= last_capture for ALL 2384 (0 violations). So the filter's
+  last-capture death-ban is STRICTER than the likelihood's first-capture ban ->
+  the likelihood gate never fires on a filter-produced X -> no separate
+  first-capture code needed in the likelihood.
+- CAM extension of last_capture_time: extended 0 of 2384. Because our
+  CaptHist.csv ALREADY contains the post-monitoring captures (id=4: last_capt=31
+  while endSampling=30). The reference needs the separate CAM file only because it
+  builds last_capture from a TRIMMED CaptHist_infer; ours isn't trimmed, so we get
+  it for free. Our filter already forbids death up to the post-monit capture.
+
+THE REAL DIFFERENCE (survival crediting):
+Our survival forces s=1 up to LAST capture, in BOTH the filter and (because they
+share the survival fn) the likelihood. The reference forces s=1 in the FILTER
+(probDyingMat, last-capture) but in the LIKELIHOOD gates only on FIRST capture --
+so for a badger alive throughout [first,last], the reference CHARGES real survival
+probability from first_capture onward, while we credit free s=1 up to last_capture.
+=> our likelihood under-penalises survival over [first_capture .. last_capture],
+which biases the survival params (c1/a2/b2) and, through them, the E:I death
+balance.
+
+This is the survival-crediting asymmetry, NOT CAM (which is a no-op for us). The
+CAM likelihood term I added is therefore also ~a no-op (survival=1 over the tail
+that our last_capture already covers -> log(1)=0). The fix that WOULD matter:
+make the LIKELIHOOD survival gate on FIRST capture (charge real survival in
+[first,last]) while the FILTER survival gates on LAST capture. These need to be
+DIFFERENT survival functions for the two roles.

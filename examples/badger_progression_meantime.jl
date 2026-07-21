@@ -60,11 +60,36 @@ function badger_transitions_meantime_siler()
     end
 end
 
-# Gompertz-Makeham survival + corrected mean-time progression (the C++-matching
-# combination). Needs badger_model_gompertz.jl loaded for gompertz_makeham_survival.
+# Gompertz-Makeham survival evaluated at the DESTINATION time (t+1), fixing an
+# off-by-one against the reference. See progression_bug.md / the transition-timing
+# note below.
+#
+# THE OFF-BY-ONE. For the transition t -> t+1, the C++ (logPost_HMC.cpp: move
+# (j-1)->j uses `TrProbSurvive_(ageMat(i,j))`, i.e. age at the DESTINATION j) and
+# the semi-Markov Julia ref (transitions.jl:11, `t_next = t+1`, survival at
+# t_next) both evaluate survival at t+1. Our gompertz_makeham_survival /
+# siler_survival read `data.age[i, t]` — the SOURCE time — so every survival
+# factor is one step of age behind the reference, and the last-capture guard
+# compares `t` where the reference compares `t+1`. Systematic across all
+# individuals and timepoints; c1/a2/b2 are pulled to compensate.
+#
+# This version reads age at t+1 and guards on t+1, matching the reference.
+function gompertz_makeham_survival_tp1(model, data, i, t)
+    tt = t + 1                                  # DESTINATION time of the t->t+1 move
+    age = tt <= data.n_timepoints ? data.age[i, tt] : data.age[i, data.n_timepoints] + (tt - data.n_timepoints)
+    age < 0 && return 1.0
+    a2, b2, c1 = model.a2, model.b2, model.c1
+    y1 = b2 * (age - 1); y2 = b2 * age
+    late = -exp(y1) * expm1(y2 - y1)
+    s = exp(-c1 + (a2 / b2) * late)
+    return tt <= data.last_capture_time[i] ? 1.0 : s
+end
+
+# Gompertz-Makeham survival (t+1) + corrected mean-time progression — the fully
+# C++-matching combination.
 function badger_transitions_meantime_gompertz()
     @transitions BADGER_STATES begin
-        @survival gompertz_makeham_survival death=:D
+        @survival gompertz_makeham_survival_tp1 death=:D
         S -> E = badger_infection
         E -> I = badger_progression_meantime
     end

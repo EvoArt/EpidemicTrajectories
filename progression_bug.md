@@ -85,3 +85,39 @@ the fit matches until a converged run shows it.
 - Randomised L: reverted; current code is fixed L=15. And L only affects mixing.
 - thetas/rhos sharing an HMC block: affects mixing (ESS/rhat), never the posterior.
 - Low ESS/rhat: SYMPTOMS of the mis-specified target, not causes.
+
+---
+
+# Second bug: survival evaluated at SOURCE time, not DESTINATION (off-by-one)
+
+After the progression fix, a run still gave tau~43, beta~2.4 (vs reference ~15,
+~0.019) and rhos collapsed to ~0.1. User suspected an off-by-one in the
+transitions. Confirmed:
+
+For the transition `t -> t+1`, BOTH references evaluate SURVIVAL at t+1:
+- C++ (logPost_HMC.cpp): move (j-1)->j, `TrProbSurvive_(ageMat(i,j))` — age at
+  DEST j. `lastCaptureTimes` compared vs j (the dest).
+- semi-Markov Julia (transitions.jl:6-18): `t_next = t+1`,
+  `groupLevelSurvivalProb(..., t_next, ...)`, `t_next <= lastCaptureTimes`.
+
+But FOI counts and group are read at the SOURCE (j-1 / t): both references and
+ours agree there.
+
+OURS evaluated EVERYTHING at the source t: `siler_survival`/`gompertz_makeham_survival`
+read `data.age[i, t]` and guard on `t <= last_capture_time`. So our survival age
+was one step behind the reference, systematically, for every individual and
+timepoint. Since `@survival` multiplies survival into every transition, c1/a2/b2
+were pulled to compensate, distorting the per-step likelihood and dragging
+beta/tau/q.
+
+FIX (badger_progression_meantime.jl): `gompertz_makeham_survival_tp1` reads age at
+t+1 and guards on t+1, matching the reference. Wired into
+badger_fit_gompertz_fixed_hmc.jl via badger_transitions_meantime_gompertz.
+
+VERIFIED MATCH (not off-by-one): FOI counts (source t), progression (source t),
+group (source t), test emission (S/E/I formulas identical to ObsProcess_.cpp).
+
+CAVEAT: 3-sweep smoke tests show scale, NOT convergence. Whether the fit now
+MATCHES the reference needs a converged run. The residual gap after the
+progression fix could be this off-by-one OR non-convergence OR a further
+discrepancy — a short run cannot distinguish them.

@@ -98,6 +98,32 @@ function gompertz_makeham_survival_tp1(model, data, i, t)
     return exp(-c1 + (a2 / b2) * late)
 end
 
+# SILER survival at the DESTINATION time (t+1), PURE (no capture gate) — the Siler
+# analogue of gompertz_makeham_survival_tp1. Same t+1 fix; keeps the a1/b1
+# early-life term. Death constraints are handled by the obs death-ban (filter) and
+# entry conditioning (likelihood), exactly as for the Gompertz-fixed model, so
+# survival here is the real Siler everywhere.
+function siler_survival_tp1(model, data, i, t)
+    tt = t + 1                                  # DESTINATION time of the t->t+1 move
+    age = tt <= data.n_timepoints ? data.age[i, tt] : data.age[i, data.n_timepoints] + (tt - data.n_timepoints)
+    age < 0 && return 1.0
+    a1, b1, a2, b2, c1 = model.a1, model.b1, model.a2, model.b2, model.c1
+    y1 = b2 * (age - 1); y2 = b2 * age
+    late = -exp(y1) * expm1(y2 - y1)
+    z1 = -b1 * (age - 1); z2 = -b1 * age
+    early = exp(z1) * expm1(z2 - z1)
+    return exp(-c1 + (a2 / b2) * late + (a1 / b1) * early)
+end
+
+# Siler survival (t+1) + corrected mean-time progression — the fixed Siler model.
+function badger_transitions_meantime_siler_tp1()
+    @transitions BADGER_STATES begin
+        @survival siler_survival_tp1 death=:D
+        S -> E = badger_infection
+        E -> I = badger_progression_meantime
+    end
+end
+
 # Gompertz-Makeham survival (t+1) + corrected mean-time progression — the fully
 # C++-matching combination.
 function badger_transitions_meantime_gompertz()
@@ -144,4 +170,48 @@ end
 function badger_observations_deathban(model, data, X, i, t)
     badger_obs_capture_deathban(model, data, X, i, t) .*
         badger_obs_tests(model, data, X, i, t)
+end
+
+## ---------------------------------------------------------------------------
+## Birth -> entry survival term (C++ PARITY — the reference does NOT condition
+## on entry)
+## ---------------------------------------------------------------------------
+#
+# The C++ (logPost_HMC.cpp:59-60) adds, for every badger BORN BEFORE the study,
+#     loglik += logS(age_at_entry)
+# where logS is the CUMULATIVE Gompertz-Makeham log-survival from birth to entry:
+#     logS(age) = -c1*age + (a2/b2)*(1 - exp(b2*age))         (DlogSt.cpp)
+# This pays the full probability of surviving birth->entry WITHOUT conditioning on
+# the badger being alive at entry — a statistical quirk (it double-counts survival
+# from birth; a correctly-conditioned model would divide it out). It exists ONLY
+# in the C++/Gompertz path, so it is used by the cpp-parity variant, NOT by the
+# entry-conditioned siler_fixed/gompertz_fixed models.
+#
+# `age_at_entry` is read from our own age matrix at the sampling-period start
+# (`data.age[i, start]`), avoiding the C++'s confusing 0/1-based index arithmetic.
+# Gompertz-Makeham only (c1,a2,b2) — matches the C++, which has no a1/b1.
+function make_entry_survival_loglik()
+    function entry_loglik(model, data, X)
+        ll = zero(_param_eltype_entry(model))
+        a2, b2, c1 = model.a2, model.b2, model.c1
+        @inbounds for i in 1:data.n_individuals
+            start_i = data.sampling_period[i][1]
+            data.birth_time[i] < start_i || continue    # only pre-study-born
+            age = data.age[i, start_i]
+            age > 0 || continue
+            # cumulative Gompertz-Makeham log-survival to `age`
+            ll += -c1 * age + (a2 / b2) * (1 - exp(b2 * age))
+        end
+        ll
+    end
+    entry_loglik
+end
+
+# param eltype helper (local, avoids importing the package internal).
+_number_type_entry(x::Number) = typeof(x)
+_number_type_entry(x::AbstractArray) = eltype(x)
+_number_type_entry(::Any) = Union{}
+function _param_eltype_entry(model)
+    T = mapreduce(_number_type_entry, promote_type, Tuple(values(model)); init=Union{})
+    (T === Union{} || T === Bool) ? Float64 : T
 end

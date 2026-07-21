@@ -97,17 +97,21 @@
 #   BADGER_ET_REV        EpidemicTrajectories git rev             (default "master")
 #   BADGER_PB_REV        PracticalBayes git rev                   (default: pinned SHA)
 #   BADGER_HMC_L         leapfrog steps per HMC move              (default 15)
-#   BADGER_MODEL   "siler" | "gompertz" | "gompertz_fixed"        (default "siler")
-#                  gompertz: Gompertz-Makeham survival, no a1/b1, tau~Exp(100),
-#                            nu~Dir(1,1,1) — matches the C++ classic rcpp.
-#                  gompertz_fixed: gompertz PLUS the correctness fixes found
-#                            2026-07-21 — mean-time progression (tau=1/rate, was
-#                            inverted), survival at destination time (off-by-one),
-#                            death forbidden before LAST capture via the
-#                            observation, and entry conditioning (likelihood loops
-#                            from FIRST capture). This is the one that holds the
-#                            E:I equilibrium near the data (I ~70% of Xinit vs 35%
-#                            before). USE THIS ONE.
+#   BADGER_MODEL   which model to fit (default "siler"). The CODE version is set
+#                  by BADGER_ET_REV (default master) — every run uses the latest
+#                  code; BADGER_MODEL only picks the model WITHIN that code.
+#     siler          — original Siler model, UN-fixed (historical baseline).
+#     gompertz       — Gompertz-Makeham, C++ priors, but WITHOUT the 2026-07-21
+#                      correctness fixes (historical).
+#     gompertz_fixed — Gompertz + ALL fixes, entry-CONDITIONED. Recommended for
+#                      the corrected model. (25000-sweep run: tau~13.8, beta~0.011,
+#                      c1~0.076 — close to the reference.)
+#     siler_fixed    — Siler survival + ALL fixes. tau prior CONFIGURABLE via
+#                      BADGER_TAU_PRIOR (default 100; set 10 for run_base_exp).
+#     gompertz_cpp   — Gompertz + fixes but FULL C++ PARITY: does NOT condition on
+#                      entry (loops from sampling start + adds birth->entry
+#                      survival, reproducing the C++'s non-conditioning quirk).
+#   BADGER_TAU_PRIOR tau prior scale (mean E->I time), siler_fixed only  (default 100)
 # =============================================================================
 
 using Pkg
@@ -242,8 +246,10 @@ const BADGER_MODEL = lowercase(get(ENV, "BADGER_MODEL", "siler"))
 const FIT_SCRIPT =
     BADGER_MODEL == "siler"    ? "badger_fit_reststotal_hmc.jl" :
     BADGER_MODEL == "gompertz" ? "badger_fit_gompertz_hmc.jl"   :
-    BADGER_MODEL == "gompertz_fixed" ? "badger_fit_gompertz_fixed_hmc.jl" :  # + mean-time tau (progression bug fix)
-    error("BADGER_MODEL must be \"siler\", \"gompertz\" or \"gompertz_fixed\", got \"$BADGER_MODEL\"")
+    BADGER_MODEL == "gompertz_fixed" ? "badger_fit_gompertz_fixed_hmc.jl" :  # entry-conditioned, all fixes
+    BADGER_MODEL == "siler_fixed"    ? "badger_fit_siler_fixed_hmc.jl" :     # Siler + all fixes, configurable tau
+    BADGER_MODEL == "gompertz_cpp"   ? "badger_fit_gompertz_cpp_hmc.jl" :    # full C++ parity (NO entry conditioning)
+    error("BADGER_MODEL must be one of: siler, gompertz, gompertz_fixed, siler_fixed, gompertz_cpp — got \"$BADGER_MODEL\"")
 @info "Fitting model" BADGER_MODEL FIT_SCRIPT
 include(joinpath(EXAMPLES, FIT_SCRIPT))
 

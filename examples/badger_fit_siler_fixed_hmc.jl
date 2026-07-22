@@ -117,14 +117,17 @@ println("Brock changepoint fixed at t=", BROCK_CHANGEPOINT, " (not inferred)")
 # `etas` is NOT in this term — it stays a conjugate Gibbs block, and the test
 # factor is provably independent of it (checked: 0.000e+00), so nothing is
 # double-counted.
-# ENTRY CONDITIONING: the transition likelihood starts each individual's sum at
-# its FIRST capture (max with the sampling-period start), so transitions before
-# entry contribute nothing — matching the reference's `j >= firstCaptureTimes`
-# gate (posterior.jl:149-150). Since survival is now pure Gompertz, this is what
-# makes the likelihood CHARGE real survival over [first_capture .. last_capture]
-# (which we previously credited for free), rather than forbidding pre-entry death
-# via the survival function.
-loglik = epidemic_loglik(data; entry_time=raw.first_capture_time)
+# ENTRY CONDITIONING (survival-only gate, matching posterior.jl:145-150). The
+# likelihood loops over the WHOLE sampling window, but before FIRST capture it
+# divides the SURVIVAL factor back out — scoring the infection (S->E) and
+# progression (E->I) transitions (the epidemic was happening whether or not we
+# were watching) while NOT charging survival (the badger is known alive at entry).
+# From first capture on, full survival is charged. `survival=` must be the same
+# function the transitions use. (An earlier version SKIPPED the pre-entry window
+# entirely, dropping ~9452 S->E/E->I terms and biasing beta/tau/q — see
+# progression_bug.md.)
+loglik = epidemic_loglik(data; entry_time=raw.first_capture_time,
+                               survival=siler_survival_tp1)
 obs_loglik = epidemic_obs_loglik(data;
                                  observation_process=badger_obs_tests,
                                  observation_weight=badger_obs_tests_weight)
@@ -389,8 +392,13 @@ const HMC_EPS = vcat(
     0.05,                   # beta
     0.05,                   # q
     0.005,                  # c1
-    0.001,                  # a1
-    0.001,                  # b1
+    # a1/b1 (Siler early-life) were never in the original manuscript, so these
+    # step sizes are a GUESS, not tuned. They are weakly identified (no age-1/2
+    # death data — see progression_bug.md), and base_exp explores a large range
+    # (a1~0.44, b1~2.36), so give them wider steps than a2/b2. Override via a mass
+    # matrix once PracticalBayes can learn one.
+    0.02,                   # a1  (wider — weakly identified, large posterior range)
+    0.05,                   # b1  (wider — base_exp b1~2.4)
     0.001,                  # a2
     0.001,                  # b2
     fill(0.005, NT),         # thetas

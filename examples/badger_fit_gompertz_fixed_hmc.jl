@@ -126,7 +126,8 @@ println("Brock changepoint fixed at t=", BROCK_CHANGEPOINT, " (not inferred)")
 # makes the likelihood CHARGE real survival over [first_capture .. last_capture]
 # (which we previously credited for free), rather than forbidding pre-entry death
 # via the survival function.
-loglik = epidemic_loglik(data; entry_time=raw.first_capture_time)
+loglik = epidemic_loglik(data; entry_time=raw.first_capture_time,
+                               survival=gompertz_makeham_survival_tp1)
 obs_loglik = epidemic_obs_loglik(data;
                                  observation_process=badger_obs_tests,
                                  observation_weight=badger_obs_tests_weight)

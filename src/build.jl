@@ -75,21 +75,60 @@ this package matches) contributes no likelihood term there either. On the badger
 dataset the average window is under half the full 161 timepoints, so this roughly
 halves the per-gradient cost.
 
-## Entry conditioning: `entry_time`
+## Conditioning on entry: `entry_time` (+ `survival`)
 
-By default each individual's transition sum starts at its `sampling_period` first
-time. Pass `entry_time` — a `Vector{Int}` of per-individual entry times — to start
-individual `i`'s sum at `max(first_t, entry_time[i])` instead. This is how a model
-CONDITIONS ON ENTRY: transitions before the entry time (e.g. before an individual
-was first observed) contribute no likelihood, matching the reference's
-`j >= firstCaptureTimes` gate. When `entry_time === nothing` (the default), the
-behaviour is unchanged.
+Many observation designs only START watching an individual partway through its
+life — a badger's first capture, a patient's enrolment. Before that entry time we
+know it was ALIVE (else we would never have seen it), but we did NOT observe its
+disease dynamics. The likelihood should therefore, in the pre-entry window:
+
+  * still score the DISEASE transitions the trajectory makes (infection,
+    progression) — the epidemic was happening whether or not we watched;
+  * NOT score the SURVIVAL factor — the individual is known alive, so charging
+    `P(survive)` there would double-count / bias the survival parameters, and
+    charging `P(die)` is simply wrong (it did not die).
+
+This is exactly the reference's `j >= firstCaptureTimes` gate, which multiplies in
+`log(survival)` only from entry onward while still scoring the infection/
+progression part before it.
+
+Pass BOTH:
+  * `entry_time` — a `Vector{Int}`, the per-individual entry time; and
+  * `survival` — the SAME survival function the transitions use,
+    `survival(model, data, i, t) -> P(survive the t -> t+1 step)`.
+
+For a step `t -> t+1` with `t < entry_time[i]`, the loglik scores
+`log(transition_prob) - log(survival)` — i.e. the transition with its survival
+factor DIVIDED OUT (in log space, subtracted), leaving just the disease-move part.
+From `entry_time[i]` on, the full `log(transition_prob)` is scored. The loop still
+runs over the whole `sampling_period` (nothing is skipped).
+
+`survival` MUST be the survival used to build `trans_mat` (so the subtraction
+exactly removes what was multiplied in). When `entry_time === nothing` (the
+default) neither argument is consulted and the behaviour is unchanged; supplying
+`entry_time` without `survival` errors, since the gate cannot be applied without
+knowing which factor is survival.
+
+The subtraction `log(transition_prob) - log(survival)` is exact for an
+alive->alive move, where `transition_prob = survival * move`. It is NOT exact for
+an alive->death move (there `transition_prob = 1 - survival`). This is fine in
+practice because a model that conditions on entry also forbids death before the
+individual is known alive (e.g. a death-banning observation process makes the
+filter never place a pre-entry death), so the pre-entry window contains only
+alive->alive moves. If your model can place death before entry, do not use this
+gate.
 
 The starting-state term is unchanged (it applies at the individual's own start,
-where the nu mixing is defined); only the transition loop's lower bound moves.
+where the nu mixing is defined).
 """
-function epidemic_loglik(data::EpidemicData; entry_time=nothing)
+function epidemic_loglik(data::EpidemicData; entry_time=nothing, survival=nothing)
     et = entry_time
+    surv = survival
+    if et !== nothing && surv === nothing
+        error("epidemic_loglik: `entry_time` requires `survival` too — the entry " *
+              "gate removes the survival factor before entry, so it must know which " *
+              "factor that is. Pass `survival=<the survival fn used in trans_mat>`.")
+    end
     function loglik(model, data::EpidemicData, X)
         ll = zero(_param_eltype(model))
 
@@ -100,8 +139,10 @@ function epidemic_loglik(data::EpidemicData; entry_time=nothing)
 
         for i in 1:data.n_individuals
             first_t, last_t = data.sampling_period[i]
-            lo = et === nothing ? first_t : max(first_t, et[i])
-            for t in lo:min(last_t, data.n_timepoints) - 1
+            # The loop covers the WHOLE window; entry conditioning changes WHAT is
+            # scored before entry (survival divided out), not WHICH steps.
+            entry_i = et === nothing ? first_t : et[i]
+            for t in first_t:min(last_t, data.n_timepoints) - 1
                 # Only ONE entry of the transition matrix matters here: the move
                 # this individual actually made. `transition_prob` computes just
                 # that, rather than building the whole matrix per (i, t) — which
@@ -109,6 +150,13 @@ function epidemic_loglik(data::EpidemicData; entry_time=nothing)
                 p = transition_prob(data.trans_mat, model, data, X, i, t,
                                     X[t, i], X[t + 1, i])
                 ll += log(p + 1e-12)
+                # Pre-entry: divide the survival factor back out (subtract its log),
+                # leaving just the disease-move part. `transition_prob` returned
+                # `survival * move`, so `log(move) = log(p) - log(survival)`.
+                if surv !== nothing && t < entry_i
+                    s = surv(model, data, i, t)
+                    ll -= log(s + 1e-12)
+                end
             end
         end
 

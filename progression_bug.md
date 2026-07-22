@@ -298,3 +298,128 @@ individual (iffbs.jl:224), and the loglik loops [max(first,entry) .. end-1] — 
 confined to the monitoring period, matching the reference. The post-monitoring
 tail is neither imputed nor in the transition loglik. This was ALREADY correct
 before this session; it was never the bug.
+
+## NOTE (do not investigate): gompertz_cpp is pathological
+The gompertz_cpp variant (full C++ parity, non-conditioning on entry + birth->entry
+survival term) gave nonsense parameter estimates on a full run. Noted for the
+record; the user asked not to investigate it. The entry-non-conditioning +
+birth->entry term is the prime suspect but is NOT being pursued.
+
+## siler_fixed vs run_base_exp after 25000 iters — should be identical, isn't
+
+siler_fixed should reproduce run_base_exp.jl (same Siler model). It doesn't:
+
+  param   siler_fixed  base_exp   diff
+  tau     13.74        15.00      -8%
+  lambda  0.00548      0.00468    +17%
+  beta    0.01104      0.01871    -41%   <- big
+  q       0.779        0.602      +29%   <- big
+  c1      0.07627      0.07467    +2%    (survival baseline: MATCHES)
+  a1      0.00015      0.44223    -99.97% <- HUGE (early-life mortality)
+  b1      0.01669      2.36494    -99.3%  <- HUGE
+  a2      0.00019      0.00011    +73%
+  b2      0.13116      0.16272    -19%
+  etas    [0.18,0.36,0.47,0.28]  [0.085,0.20,0.13,0.12]  2-4x higher
+
+The a1/b1 divergence is the tell: base_exp has SUBSTANTIAL early-life mortality
+(a1~0.44, b1~2.36), siler_fixed has ~none (a1~0, b1~0.02). c1 (the constant
+Makeham hazard) MATCHES (0.076 vs 0.075). So the disagreement is entirely in the
+AGE-DEPENDENT survival terms (a1/b1 early-life, a2/b2 late-life) — consistent with
+a survival-likelihood/imputation difference, exactly the user's hunch. etas 2-4x
+higher also points at survival: if our badgers "die" (leave the alive states)
+differently, the alive-and-available denominator for the capture-probability
+conjugate update changes.
+
+## siler_fixed a1/b1 divergence localised to AGE-1 survival + a pre-entry loglik bug
+
+Comparing the implied survival curves:
+  age  siler_fixed  base_exp
+   1     0.926       0.783    <- differ ~14% ONLY at age 1
+   2     0.926       0.913
+   3+    ~identical
+c1 (constant hazard) matches (0.076 vs 0.075). So the ENTIRE a1/b1 disagreement
+is first-year (age-1) mortality: base_exp sees young badgers dying (a1=0.44),
+siler_fixed does not (a1~0).
+
+CANDIDATE BUG (entry conditioning too aggressive): the reference (posterior.jl:145)
+loops from START_SAMPLING and gates only the SURVIVAL factor on entry
+(`log_pti = j >= entry_i ? log(isp) : 0`), STILL scoring the infection/progression
+transition branches (S->E, E->I) in [start_sampling, first_capture) with survival=1.
+Our `entry_time` fix skips the WHOLE window (loop from max(first_t, entry)), so we
+DROP those pre-entry S->E / E->I terms. That plausibly drives beta (-41%), q, tau.
+
+NOT YET EXPLAINED: whether this pre-entry gap accounts for the AGE-1/a1-b1
+divergence specifically. a1/b1 are informed by DEATHS, which occur post-last-capture
+(older ages), not by pre-entry infection terms. There may be a SECOND survival
+difference in how/where death events are scored. Do NOT claim solved until the
+age-1 death evidence confirms it. Next: confirm pre-entry cell count + ages, then
+fix entry conditioning to gate only the survival factor (not the whole transition),
+and re-run.
+
+## RESOLVED: a1/b1 divergence is WEAK IDENTIFIABILITY, not a bug
+
+Death-age distribution in Xinit: deaths start at AGE 4-5, peak at 5-6, NONE at
+age 1-2. And 0 badgers have their last capture at age 1-2 -> death can NEVER be
+imputed young (death-ban forbids death before last capture, in both models). So
+neither model has any age-1/age-2 death DATA.
+
+The Siler early-life term (a1/b1) governs age-1/2 mortality. With NO data there,
+it is unidentified and drifts. Proof: over the OBSERVED death-age range (4-15),
+siler_fixed's survival and base_exp's survival differ by AT MOST 0.19% — despite
+a1/b1 differing by 99.97%. The observable survival is identical; only the
+data-free young-age region is parameterised differently.
+
+=> a1/b1 divergence is NOT a survival-likelihood bug. It is two MCMC runs landing
+in different spots of a flat/ridged posterior region. (base_exp a1=0.44 is no more
+"correct" than our a1~0 — neither is informed by data.) The user's survival-bug
+hunch is CORRECT about there being a survival-side issue, but it is the PRE-ENTRY
+likelihood gap (below), not a1/b1.
+
+## The REAL bug: pre-entry infection/progression terms dropped
+
+The reference (posterior.jl:145) loops from START_SAMPLING and, in
+[start_sampling, first_capture), scores infection (S->E: log1mexp(-foi)) and
+progression (E->I: log(progRate)) transitions with the SURVIVAL factor gated to 0
+(log_pti=0) and death forbidden (log_qti=-Inf). Our siler_fixed `entry_time` fix
+skips the WHOLE pre-entry window, so we DROP those infection/progression terms.
+
+Measured: 2367 of 2384 badgers have a pre-entry gap, 9452 transition-steps total
+(4672 at age 1-2). Dropping the S->E/E->I likelihood there plausibly drives the
+REAL divergences: beta -41%, q +29%, tau -8%.
+
+FIX: entry conditioning must gate only the SURVIVAL factor (as the reference
+does), NOT skip the whole transition. i.e. loop from start_sampling, but zero the
+survival contribution before first_capture while KEEPING infection/progression.
+This is a package-level change to epidemic_loglik's entry_time semantics.
+
+## Division of remaining work (2026-07-22)
+- a1/b1 divergence: user investigating — likely an HMC EPSILON issue. a1/b1 were
+  NOT in the original manuscript, so their per-parameter step sizes were never
+  optimised (HMC_EPS uses 0.001 for both, copied as a guess). Weak identifiability
+  (above) + un-tuned epsilon = the two runs explore the flat region differently.
+  NOT a likelihood bug. FUTURE PracticalBayes: learn a mass matrix (e.g. via a
+  NUTS warmup) and reuse it for the fixed-eps HMC — would fix the un-tuned-epsilon
+  class of problem generally.
+- entry-conditioning survival-only gate: THIS agent — package feature so the
+  likelihood can condition on entry by zeroing only the SURVIVAL factor before
+  first-capture, while KEEPING infection/progression (matching posterior.jl).
+
+## Entry-conditioning FIX: survival-only gate (package feature)
+
+Implemented `epidemic_loglik(data; entry_time=..., survival=...)`. The loop now
+covers the WHOLE window; before entry it subtracts log(survival) from
+log(transition_prob), removing the survival factor while keeping the disease move.
+
+VERIFIED the subtraction is exact for every alive->alive move (our @survival makes
+each `survival * conditional-move`, so dividing survival out leaves the move):
+  S->S: trans_prob = survival*exp(-foi)      -> -log(surv) -> -foi        = ref
+  S->E: trans_prob = survival*(1-exp(-foi))  -> -log(surv) -> log1mexp(-foi) = ref
+  E->E: trans_prob = survival*(1-progRate)   -> -log(surv) -> log(1-progRate) = ref
+  E->I: trans_prob = survival*progRate       -> -log(surv) -> log(progRate)   = ref
+  I->I: trans_prob = survival                -> -log(surv) -> 0               = ref
+alive->D pre-entry cannot occur (death-ban obs forbids it), so the one inexact
+case (trans_prob=1-survival there) never fires. Documented.
+
+Ergonomics: user passes entry_time (Vector{Int}) + the survival fn; error if
+entry_time given without survival. entry_time=nothing => unchanged. Wired into
+siler_fixed and gompertz_fixed (gompertz_cpp intentionally does NOT condition).

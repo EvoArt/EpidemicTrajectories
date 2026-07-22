@@ -112,6 +112,14 @@
 #                      entry (loops from sampling start + adds birth->entry
 #                      survival, reproducing the C++'s non-conditioning quirk).
 #   BADGER_TAU_PRIOR tau prior scale (mean E->I time), siler_fixed only  (default 100)
+#   BADGER_SAMPLER   continuous-parameter kernel, siler_fixed only       (default "hmc")
+#                    "hmc"         — fixed-eps HMC with hand-set per-param steps.
+#                    "nutsthenhmc" — NUTS learns the mass matrix + step over
+#                                    BADGER_NADAPTS warm-up sweeps, then fixed-L
+#                                    HMC on the adapted metric. Tunes the weakly-
+#                                    informed a1/b1 without hand-guessing epsilons.
+#                                    (Requires PracticalBayes >= a594b49.)
+#   BADGER_NADAPTS   warm-up sweeps for nutsthenhmc                       (default 1000)
 # =============================================================================
 
 using Pkg
@@ -168,7 +176,7 @@ end
 # current tip of master (what you want when running the latest work).
 const PRACTICALBAYES_URL = "https://github.com/EvoArt/PracticalBayes.git"
 const PRACTICALBAYES_REV = get(ENV, "BADGER_PB_REV",
-                               "21b0576377893ad50608e0c3da1372b118a54dce")
+                               "a594b496804a343968a41396d9e7f534216d4f84")
 const EPITRAJ_URL        = "https://github.com/EvoArt/EpidemicTrajectories.git"
 const EPITRAJ_REV        = get(ENV, "BADGER_ET_REV", "master")
 

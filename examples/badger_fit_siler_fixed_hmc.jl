@@ -52,6 +52,7 @@ using PracticalBayes
 using Distributions
 using Random
 using AdvancedHMC: HMC, Leapfrog, DiagEuclideanMetric
+using PracticalBayes: NUTSthenHMC
 using ADTypes: AutoPolyesterForwardDiff
 using PolyesterForwardDiff: PolyesterForwardDiff
 import AbstractMCMC
@@ -419,6 +420,20 @@ function make_hmc_block(eps_vec, L)
     HMC(L; integrator=Leapfrog(1.0), metric=DiagEuclideanMetric(eps_vec .^ 2))
 end
 
+# `BADGER_SAMPLER` selects the continuous-parameter kernel:
+#   "hmc"          (default) : fixed-eps HMC with the hand-set per-parameter
+#                              step sizes in HMC_EPS (n_adapts=0).
+#   "nutsthenhmc"            : run NUTS for `BADGER_NADAPTS` warm-up sweeps to
+#                              LEARN the mass matrix + step size, then switch to
+#                              fixed-L HMC using what NUTS adapted. This is the
+#                              way to get well-tuned steps for the weakly-informed
+#                              a1/b1 without hand-guessing epsilons — NUTS finds
+#                              them. HMC_EPS is unused in this mode.
+# NUTS adapts its own diagonal metric, so the per-parameter epsilons are learned,
+# not supplied; the whole point is to stop hand-tuning them.
+const BADGER_SAMPLER = lowercase(get(ENV, "BADGER_SAMPLER", "hmc"))
+const BADGER_NADAPTS = parse(Int, get(ENV, "BADGER_NADAPTS", "1000"))
+
 ## ---------------------------------------------------------------------------
 ## Run
 ## ---------------------------------------------------------------------------
@@ -427,7 +442,13 @@ function run_badger_fit(n_sweeps; n_burn=0, seed=13)
     m = badger_base(data, data.n_timepoints, data.n_individuals, G, NT, NS, NNU,
                     loglik, obs_loglik)
 
-    hmc_kernel = make_hmc_block(HMC_EPS, HMC_L)
+    # Either fixed-eps HMC (hand-set steps) or NUTSthenHMC (NUTS learns the
+    # metric/step over warm-up, then fixed-L HMC). See BADGER_SAMPLER above.
+    hmc_kernel = BADGER_SAMPLER == "nutsthenhmc" ? NUTSthenHMC(0.8) :
+                 BADGER_SAMPLER == "hmc"         ? make_hmc_block(HMC_EPS, HMC_L) :
+                 error("BADGER_SAMPLER must be \"hmc\" or \"nutsthenhmc\", got \"$BADGER_SAMPLER\"")
+    # NUTSthenHMC needs a real warm-up phase to adapt in; fixed HMC adapts nothing.
+    n_adapts = BADGER_SAMPLER == "nutsthenhmc" ? BADGER_NADAPTS : 0
 
     # BLOCKING: ONE HMC block for all 61 continuous parameters, plus conjugate
     # Gibbs for etas/nu and iFFBS for X. Benchmarked (50 sweeps each,
@@ -490,14 +511,17 @@ function run_badger_fit(n_sweeps; n_burn=0, seed=13)
              x_save == "chain"  ? :chain :
              error("BADGER_X_SAVE must be \"disk\", \"buffer\", or \"chain\", got \"$x_save\"")
 
-    println("\nGibbs: fixed-eps HMC(L=$HMC_L, Siler survival (fixed), configurable tau prior) ",
+    kernel_desc = BADGER_SAMPLER == "nutsthenhmc" ?
+        "NUTSthenHMC(0.8, n_adapts=$n_adapts) [NUTS learns metric+step, then fixed-L HMC]" :
+        "fixed-eps HMC(L=$HMC_L)"
+    println("\nGibbs: $kernel_desc, Siler survival (fixed), configurable tau prior ",
             "(13 continuous, Siler a1/b1) + conjugate(etas, nu) + iFFBS(X, reststotal coupling)")
     println("adtype=", ADTYPE)
     println("sweeps=$n_sweeps burn=$n_burn seed=$seed")
     println("X save mode: $x_save", x_save == "disk" ? " (every $x_flush_every sweeps -> $x_path)" : "")
     t0 = time()
     chn = AbstractMCMC.sample(StableRNG(seed), m, spl, n_sweeps;
-                              init=init, adtype=ADTYPE, n_adapts=0, discard_initial=n_burn,
+                              init=init, adtype=ADTYPE, n_adapts=n_adapts, discard_initial=n_burn,
                               save_states=(X=x_disp,))
     elapsed = time() - t0
     println("done in ", round(elapsed / 60, digits=1), " min (", round(elapsed, digits=1), " s)")

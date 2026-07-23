@@ -176,7 +176,7 @@ end
 # current tip of master (what you want when running the latest work).
 const PRACTICALBAYES_URL = "https://github.com/EvoArt/PracticalBayes.git"
 const PRACTICALBAYES_REV = get(ENV, "BADGER_PB_REV",
-                               "a594b496804a343968a41396d9e7f534216d4f84")
+                               "bcb5fe4890f154ae44fa298c2e71b9b940b1351f")
 const EPITRAJ_URL        = "https://github.com/EvoArt/EpidemicTrajectories.git"
 const EPITRAJ_REV        = get(ENV, "BADGER_ET_REV", "master")
 

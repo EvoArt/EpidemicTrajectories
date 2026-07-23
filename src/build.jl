@@ -133,12 +133,19 @@ function epidemic_loglik(data::EpidemicData; entry_time=nothing, survival=nothin
         ll = zero(_param_eltype(model))
 
         for i in 1:data.n_individuals
-            p0 = data.starting_state(model, data, X, i, 1)
-            ll += log(p0[X[1, i]] + 1e-12)
-        end
-
-        for i in 1:data.n_individuals
             first_t, last_t = data.sampling_period[i]
+            # Score the starting state at the individual's OWN window start, NOT at
+            # absolute time 1. iFFBS imputes and stores the trajectory over
+            # [first_t, last_t] only (iffbs_individual!: xᵢ = X[first_t:last_t, i])
+            # and draws the initial state into X[first_t, i]. Reading X[1, i] here
+            # for a badger whose window starts later scores a cell iFFBS never
+            # touches — a stale X_init value uncoupled from the sampled trajectory.
+            # (`badger_starting_state` ignores its t arg and recomputes first_t
+            # internally, so the DISTRIBUTION was already correct; only the state
+            # index it was scored against was wrong.)
+            p0 = data.starting_state(model, data, X, i, first_t)
+            ll += log(p0[X[first_t, i]] + 1e-12)
+
             # The loop covers the WHOLE window; entry conditioning changes WHAT is
             # scored before entry (survival divided out), not WHICH steps.
             entry_i = et === nothing ? first_t : et[i]

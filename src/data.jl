@@ -47,7 +47,7 @@ profiling: this alone accounted for the bulk of a ~6x gap between the badger
 model's iFFBS sweep and its reference-implementation counterpart, matching the
 same pattern found earlier for `trans_mat` — see the devlog/repro log for both.
 """
-struct EpidemicData{SS,OP,OW,RC,EX<:NamedTuple,AG<:NamedTuple,RF<:Tuple,DS<:Tuple}
+struct EpidemicData{SS,OP,OW,RC,EX<:NamedTuple,AG<:NamedTuple,RF<:Tuple,CP,DS<:Tuple}
     n_individuals::Int
     n_timepoints::Int
     n_states::Int
@@ -55,7 +55,14 @@ struct EpidemicData{SS,OP,OW,RC,EX<:NamedTuple,AG<:NamedTuple,RF<:Tuple,DS<:Tupl
     group::Vector{Int}
     members_by_group::Dict{Int,Vector{Int}}
     sampling_period::Vector{Tuple{Int,Int}}
-    trans_mat::TransitionSpec{RF}
+    # BOTH of `TransitionSpec`'s parameters must be bound here. `TransitionSpec`
+    # gained a second parameter (`C`, the survival-free coupling view) when the
+    # coupling fix landed; leaving this as `TransitionSpec{RF}` makes it a UnionAll
+    # — an ABSTRACT field — so every `data.trans_mat` read boxes and dispatches at
+    # runtime. That field is the hub of the package (`transition_matrix_at!`,
+    # `transition_prob`, for every individual at every timepoint), so an abstract
+    # type here is the single most expensive instability the struct can have.
+    trans_mat::TransitionSpec{RF,CP}
     starting_state::SS
     # The observation model comes in two shapes. `observation_process` returns the
     # whole per-state weight VECTOR (what the filter needs); `observation_weight`

@@ -15,7 +15,7 @@
 #
 # A derived summary has the signature
 #
-#     (model, data, X, s, i, t; reverse=false) -> nothing
+#     (model, data, X, s, i, t, reverse=false) -> nothing
 #
 # where `s` is the state being applied (or reversed) for individual `i` at time
 # `t`. It mutates `data.aggregates` in place. Write one with `@aggregate` (sugar),
@@ -146,7 +146,7 @@ function _aggregate_line_to_lambda(line, names, ss_expr)
     inv_op = _invert_op(op)
     rev = Expr(inv_op, upd.args[1], upd.args[2])
 
-    return :((model, data, X, s, i, t; reverse=false) -> begin
+    return :((model, data, X, s, i, t, reverse=false) -> begin
         if $cond
             if reverse
                 $rev
@@ -194,7 +194,7 @@ end
 ```
 
 For an aggregate the macro cannot express, write the summary by hand: any function
-`(model, data, X, s, i, t; reverse=false)` that honours `reverse` will do — pass it
+`(model, data, X, s, i, t, reverse=false)` that honours `reverse` will do — pass it
 as an [`AggregateSpec`](@ref) with your own storage.
 """
 macro aggregate(args...)
@@ -345,6 +345,6 @@ allocation per call), which is precisely what this is trying to avoid.
 """
 @inline apply_summaries!(::Tuple{}, model, data, X, s, i, t, reverse) = nothing
 @inline function apply_summaries!(summaries::Tuple, model, data, X, s, i, t, reverse)
-    first(summaries)(model, data, X, s, i, t; reverse=reverse)
+    first(summaries)(model, data, X, s, i, t, reverse)
     return apply_summaries!(Base.tail(summaries), model, data, X, s, i, t, reverse)
 end

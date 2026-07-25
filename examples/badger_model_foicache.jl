@@ -82,7 +82,7 @@ const _S_CODE = findfirst(==(:S), BADGER_STATES)
 const _I_CODE = findfirst(==(:I), BADGER_STATES)
 const _D_CODE = findfirst(==(:D), BADGER_STATES)
 
-function _summary_n_infectious(model, data, X, s, i, t; reverse=false)
+function _summary_n_infectious(model, data, X, s, i, t, reverse=false)
     g = data.social_group[i, t]
     g > 0 || return nothing
     contrib = (s == _I_CODE)
@@ -94,7 +94,7 @@ function _summary_n_infectious(model, data, X, s, i, t; reverse=false)
     nothing
 end
 
-function _summary_n_alive(model, data, X, s, i, t; reverse=false)
+function _summary_n_alive(model, data, X, s, i, t, reverse=false)
     g = data.social_group[i, t]
     g > 0 || return nothing
     contrib = (s != _D_CODE)
@@ -117,7 +117,7 @@ end
 #
 # Must be ordered AFTER the count summaries in `derived_summaries` — it reads what
 # they write.
-function _summary_foi(model, data, X, s, i, t; reverse=false)
+function _summary_foi(model, data, X, s, i, t, reverse=false)
     g = data.social_group[i, t]
     g > 0 || return nothing
     I = data.aggregates.n_infectious[g, t]

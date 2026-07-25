@@ -232,8 +232,10 @@ function iffbs_individual!(model, data::EpidemicData, X, i, rng)
         apply_summaries!(data.derived_summaries, model, data, X, X[t, i], i, t, true)
     end
 
+    data._focal[] = i
     probs, trans_cache = forward_filter(xᵢ, start_sampling, end_sampling, model, data, X, i)
     backward_sample!(probs, trans_cache, xᵢ, start_sampling, end_sampling, model, data, X, i, rng)
+    data._focal[] = -1
 
     @inbounds for t in start_sampling:end_sampling
         apply_summaries!(data.derived_summaries, model, data, X, X[t, i], i, t, false)

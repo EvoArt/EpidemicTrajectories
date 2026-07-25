@@ -1,15 +1,26 @@
 # Standalone badger SEID fit — RESTTOTAL coupling. Replaces the package-default
 # coupling with the reference's O(n_states)-per-(i,t) running-total shape: two extra
 # reversible summaries (nSE, nSS) and a custom `rest_contribution`. Fastest iFFBS.
-# Uses fixed HMC (hand-tuned step sizes), scalar `observation_weight`, and
-# `coupled_transitions`. Saves the chain to JLD2 and CSV.
+# Uses AdaptiveHMC (learns mass matrix + step size — same sampler as badger_run.jl,
+# so the two scripts are a clean A/B on the coupling term alone), scalar
+# `observation_weight`, and `coupled_transitions`. Saves the chain to JLD2 and CSV.
 
 import Pkg
 Pkg.activate(@__DIR__)
-for (name, path) in (("EpidemicTrajectories", dirname(@__DIR__)),
-                     ("PracticalBayes", joinpath(homedir(), ".julia", "dev", "PracticalBayes")),
-                     ("PracticalEpiBayes", joinpath(homedir(), ".julia", "dev", "PracticalEpiBayes")))
-    haskey(Pkg.project().dependencies, name) || Pkg.develop(path=path)
+# Prefer a local `dev`'d checkout (picks up uncommitted/in-progress work); fall
+# back to the GitHub `master` branch when the local path isn't there (e.g. a
+# fresh machine that only has this examples/ directory checked out).
+for (name, path, url) in (
+        ("EpidemicTrajectories", dirname(@__DIR__), "https://github.com/EvoArt/EpidemicTrajectories.git"),
+        ("PracticalBayes", joinpath(homedir(), ".julia", "dev", "PracticalBayes"), "https://github.com/EvoArt/PracticalBayes.git"),
+        ("PracticalEpiBayes", joinpath(homedir(), ".julia", "dev", "PracticalEpiBayes"), "https://github.com/EvoArt/PracticalEpiBayes.git"),
+    )
+    haskey(Pkg.project().dependencies, name) && continue
+    if isdir(path)
+        Pkg.develop(path=path)
+    else
+        Pkg.add(url=url)
+    end
 end
 for pkg in ("Distributions", "ADTypes", "PolyesterForwardDiff", "AdvancedHMC",
             "StableRNGs", "CSV", "DataFrames", "JLD2", "AbstractMCMC", "Dates", "Statistics")
@@ -20,13 +31,13 @@ Pkg.instantiate()
 using EpidemicTrajectories, PracticalBayes, PracticalEpiBayes
 using Distributions, Random, StableRNGs, CSV, DataFrames, JLD2, Dates
 using ADTypes: AutoPolyesterForwardDiff
-using AdvancedHMC: HMC, Leapfrog, DiagEuclideanMetric
+using PracticalBayes: AdaptiveHMC
 using PolyesterForwardDiff
 using Statistics: mean, std, median
 import AbstractMCMC
 
-const N_SWEEPS = 1000                 # total sweeps (burn-in + sampled)
-const N_BURN = 500                    # fixed-HMC burn-in (discarded); no adaptation
+const N_SWEEPS = 1000                 # total sweeps (adapt + sampled)
+const N_ADAPT = 500                   # AdaptiveHMC warm-up; learns mass matrix + step size
 const DATA_DIR = let a = joinpath(pwd(), "badger_ref", "RData2"),
                      b = joinpath(pwd(), "..", "badger_ref", "RData2")
     isdir(a) ? a : b
@@ -348,14 +359,13 @@ Distributions.rand(::AbstractRNG, d::NuPlaceholder) = fill(0.05, d.n, 2)
     @addlogprob! ll(pars, data, X) + oll(pars, data, X)
 end
 
-# Fixed HMC with hand-tuned step sizes (the eps regime known to work for this model).
-# One eps per parameter, in HMC-block order: tau, alpha(xG), lambda, beta, q, c1, a1,
-# b1, a2, b2, thetas(xNT), rhos(xNT), phis(xNT).
-HMC_EPS = vcat(0.002, fill(0.2, G), 0.01, 0.05, 0.05, 0.005, 0.02, 0.05,
-               0.001, 0.001, fill(0.005, NT), fill(0.005, NT), fill(0.005, NT))
+# AdaptiveHMC learns the mass matrix and step size over the first N_ADAPT sweeps,
+# then holds them fixed — matches badger_run.jl's sampler exactly, so the two
+# scripts are a clean A/B on the coupling term alone (default vs reststotal),
+# not confounded by different step-size tuning.
 spl = Gibbs(
     (:tau, :alpha, :lambda, :beta, :q, :c1, :a1, :b1, :a2, :b2, :thetas, :rhos, :phis) =>
-        HMC(15; integrator=Leapfrog(1.0), metric=DiagEuclideanMetric(HMC_EPS .^ 2)),
+        AdaptiveHMC(0.8; n_leapfrog=15),
     :etas => capture_prob_kernel(:etas; caught=data.capture, effort=data.capt_effort,
                                  group=data.social_group, index=data.season,
                                  dead_state=D, n=NS, prior=(1, 1)),
@@ -380,10 +390,10 @@ init = (; X=X0, tau=5.0, alpha=fill(0.001, G), lambda=0.01, beta=0.01, q=0.5,
 m = badger(data, data.n_timepoints, data.n_individuals, G, NT, NS, NNU, loglik, obs_loglik)
 
 println("Badger fit (reststotal): $(data.n_individuals) badgers x $(data.n_timepoints) t, ",
-        "$G groups, $N_SWEEPS sweeps ($N_BURN burn-in)")
+        "$G groups, $N_SWEEPS sweeps ($N_ADAPT adapt)")
 t0 = time()
 chn = AbstractMCMC.sample(StableRNG(13), m, spl, N_SWEEPS;progress=true,
-                          init=init, n_adapts=0, discard_initial=N_BURN,
+                          init=init, n_adapts=N_ADAPT, discard_initial=N_ADAPT,
                           adtype=AutoPolyesterForwardDiff(; chunksize=nothing, tag=nothing),
                           save_states=(X=:buffer,))
 elapsed = time() - t0
@@ -393,7 +403,7 @@ elapsed = time() - t0
 
 println("\ninference time: $(round(elapsed / 60, digits=1)) min ",
         "($(round(elapsed, digits=1)) s, $(round(elapsed / N_SWEEPS, digits=3)) s/sweep)")
-println("=== posterior means (sd), $(N_SWEEPS - N_BURN) post-burn-in draws ===")
+println("=== posterior means (sd), $(N_SWEEPS - N_ADAPT) post-warmup draws ===")
 for name in (:tau, :lambda, :beta, :q, :c1, :a1, :b1, :a2, :b2)
     v = vec(chn[name])
     println(rpad(name, 8), round(mean(v); digits=4), "  (", round(std(v); digits=4), ")")

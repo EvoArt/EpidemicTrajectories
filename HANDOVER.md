@@ -1,6 +1,24 @@
 # Handover — badger fit state, fixes, and open crash
 
-## TL;DR
+## RESOLVED (2026-07-25)
+
+The `ReadOnlyMemoryError` crash was root-caused and fixed: `EpidemicData.trans_mat`
+was declared `TransitionSpec{RF}`, but `TransitionSpec` had gained a second type
+parameter (`{RF,C}`, the survival-free coupling view — see item 2 below). With `C`
+unbound this was a `UnionAll`, i.e. an ABSTRACT field, on the hottest path in the
+package (read for every individual at every timepoint under multithreaded AD).
+Fixed by binding it as `TransitionSpec{RF,CP}`. See `CLAUDE.md`'s performance
+section and memory note `readonlymemoryerror-crash-fix-2026-07-25` for the full
+diagnosis (including two other hypotheses — an OOB index, a `_focal` data race —
+that were proposed and refuted before the real cause was found).
+
+Validated by 3 clean 1000-sweep runs across all 3 badger example scripts
+(`badger_run.jl`, `badger_run_allhmc.jl`, `badger_run_reststotal.jl`, all now on
+`AdaptiveHMC`), no crashes, consistent posterior means. This work is being merged
+to `master`; the rest of this document is kept as investigation history — the
+branch name below no longer applies.
+
+## TL;DR (historical — investigation notes below, problem now resolved above)
 On branch `fix-badger-focal-package`. A large body of work is **uncommitted in the
 working tree**. There is a **`ReadOnlyMemoryError` crash** under investigation. A
 clean isolation test (running the known-good script on the current tree) was

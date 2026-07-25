@@ -8,10 +8,20 @@
 
 import Pkg
 Pkg.activate(@__DIR__)
-for (name, path) in (("EpidemicTrajectories", dirname(@__DIR__)),
-                     ("PracticalBayes", joinpath(homedir(), ".julia", "dev", "PracticalBayes")),
-                     ("PracticalEpiBayes", joinpath(homedir(), ".julia", "dev", "PracticalEpiBayes")))
-    haskey(Pkg.project().dependencies, name) || Pkg.develop(path=path)
+# Prefer a local `dev`'d checkout (picks up uncommitted/in-progress work); fall
+# back to the GitHub `master` branch when the local path isn't there (e.g. a
+# fresh machine that only has this examples/ directory checked out).
+for (name, path, url) in (
+        ("EpidemicTrajectories", dirname(@__DIR__), "https://github.com/EvoArt/EpidemicTrajectories.git"),
+        ("PracticalBayes", joinpath(homedir(), ".julia", "dev", "PracticalBayes"), "https://github.com/EvoArt/PracticalBayes.git"),
+        ("PracticalEpiBayes", joinpath(homedir(), ".julia", "dev", "PracticalEpiBayes"), "https://github.com/EvoArt/PracticalEpiBayes.git"),
+    )
+    haskey(Pkg.project().dependencies, name) && continue
+    if isdir(path)
+        Pkg.develop(path=path)
+    else
+        Pkg.add(url=url)
+    end
 end
 for pkg in ("Distributions", "ADTypes", "PolyesterForwardDiff",
             "StableRNGs", "CSV", "DataFrames", "JLD2", "AbstractMCMC", "Dates", "Statistics")

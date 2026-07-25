@@ -199,6 +199,23 @@ two changes, neither of which was the one that looked obvious:
    199 MB). Call summaries ONLY through `apply_summaries!`. Note it takes
    `reverse` POSITIONALLY: a keyword on a call the compiler cannot resolve forces
    the kwarg path and allocates a NamedTuple per call.
+   **A struct field typed on a parametric type MUST bind every one of that type's
+   parameters, or the field is ABSTRACT.** Third instance of the concrete-types
+   trap (after `rate_fns`/`derived_summaries` above): when `TransitionSpec` gained
+   a second parameter (`{RF,C}`, the survival-free coupling view — see
+   `coupling_trans_mat` below), `EpidemicData`'s field stayed declared as
+   `trans_mat::TransitionSpec{RF}`. With `C` unbound that is a `UnionAll`, i.e.
+   abstract — confirmed via `isconcretetype(fieldtype(EpidemicData, :trans_mat))`
+   → `false`. `data.trans_mat` is the hub of the package (read for every individual
+   at every timepoint inside `@inbounds` regions under multithreaded AD), so this
+   was the most expensive possible place for it. It surfaced as an intermittent
+   `ReadOnlyMemoryError`/`bad_alloc` crash under `AutoPolyesterForwardDiff`, not as
+   a type error — nothing rejects an abstractly-typed field at compile time, and
+   `isconcretetype` on the ONE mentioned parameter still reads fine, so this is
+   invisible unless checked on the whole `fieldtype`. Fix: add every new type
+   parameter to both the defining struct AND the field's declared type
+   (`TransitionSpec{RF,CP}`) in the SAME change — a parametric type gaining a
+   parameter is a signal to grep every place it appears as a field annotation.
 2. **`coupled_transitions`.** The user declares which of a neighbour's transitions
    the focal can influence; the sampler skips neighbours whose realised move it
    cannot affect. Exact (verified to 1e-13), and worth ~10x on the badger model.

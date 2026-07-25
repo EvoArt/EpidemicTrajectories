@@ -25,14 +25,37 @@ as a `Vector{Function}` every rate call in `transition_matrix_at` — the hub of
 whole package, called for every individual at every timepoint — would be a runtime
 dispatch returning `Any`, and the arithmetic on the result would box.
 
+## The `coupling` view (survival-free rates)
+
+`coupling` holds a SECOND, survival-free view of the transitions, used ONLY by the
+coupling term (`make_rest_contribution`). It exists to fix a subtle bug: `@survival`
+scales every live transition by `survival` and adds `* -> death` rows, so the main
+`rate_fns` compute `survival * infection`. But the coupling asks "how does the
+FOCAL change a neighbour's move probability", and the focal influences only the
+INFECTION factor, never the neighbour's own survival. Scoring the neighbour through
+the survival-scaled probability lets a small `survival` DESTROY the infection signal
+— when `survival * infection` underflows to `0.0`, every focal candidate is scored
+identically and the coupling goes flat, silently degenerating the chain.
+
+So `@survival` stashes the UN-scaled infection/progression transitions (no death
+rows) here, and the coupling evaluates neighbours against these bare rates. Survival
+never enters the coupling, so it cannot annihilate the signal. When there is no
+`@survival`, `coupling === nothing` and the coupling falls back to the full spec
+(correct, since there is no survival factor to strip).
+
 Build one with [`@transitions`](@ref) rather than calling this directly.
 """
-struct TransitionSpec{RF<:Tuple}
+struct TransitionSpec{RF<:Tuple,C}
     states::Vector{Symbol}
     transitions::Vector{Tuple{Symbol,Symbol}}
     rate_fns::RF
     auto_self::Bool
+    coupling::C            # a survival-free TransitionSpec, or `nothing`
 end
+# Backward-compatible constructor: no separate coupling view (coupling === nothing
+# means "use the full spec", which is correct whenever there is no survival factor).
+TransitionSpec(states, transitions, rate_fns, auto_self) =
+    TransitionSpec(states, transitions, rate_fns, auto_self, nothing)
 
 # Rates may be written at three levels of sugar, in decreasing order of brevity:
 #
@@ -146,6 +169,12 @@ function _parse_transition_block(block)
         end
     end
 
+    # The bare (survival-free) transitions — the infection/progression moves exactly
+    # as written, before any survival scaling and before the death rows are added.
+    # This is what the coupling term uses (see `TransitionSpec`'s `coupling` field).
+    # `nothing` when there is no `@survival` (then the full spec IS survival-free).
+    bare_transitions = survival_expr === nothing ? nothing : copy(transitions)
+
     # `@survival p death=:D` means every non-death transition is conditional on
     # surviving the step (its rate is scaled by `p`), and every live state gains a
     # transition to the death state with the leftover probability `1 - p`.
@@ -171,7 +200,7 @@ function _parse_transition_block(block)
         end
     end
 
-    return transitions
+    return transitions, bare_transitions
 end
 
 """
@@ -257,7 +286,7 @@ macro transitions(args...)
     block = rest[1]
     block isa Expr && block.head == :block || error("@transitions body must be begin...end")
 
-    trs = _parse_transition_block(block)
+    trs, bare = _parse_transition_block(block)
     seen_states = unique(vcat(Symbol[t[1] for t in trs], Symbol[t[2] for t in trs]))
     trans_pairs = [:(($(QuoteNode(t[1])), $(QuoteNode(t[2])))) for t in trs]
     rates = [_wrap_rate_expr(t[3]) for t in trs]
@@ -267,12 +296,29 @@ macro transitions(args...)
         :($(_check_state_space)(collect(Symbol, $(esc(state_space_expr))),
                                 Symbol[$(map(QuoteNode, seen_states)...)]))
 
+    # The survival-free coupling view, built over the SAME state encoding so its
+    # indices line up. Only the bare infection/progression moves; `auto_self` gives
+    # the leftover mass as the "stay" probability (e.g. S->S = 1 - foi), which is
+    # exactly what the coupling scores a non-moving neighbour against. `nothing`
+    # when there was no `@survival`.
+    coupling_expr = if bare === nothing
+        :nothing
+    else
+        bare_pairs = [:(($(QuoteNode(t[1])), $(QuoteNode(t[2])))) for t in bare]
+        bare_rates = [_wrap_rate_expr(t[3]) for t in bare]
+        :(TransitionSpec($states_expr,
+                         Tuple{Symbol,Symbol}[$(bare_pairs...)],
+                         ($(map(esc, bare_rates)...),),
+                         true, nothing))
+    end
+
     quote
         TransitionSpec(
             $states_expr,
             Tuple{Symbol,Symbol}[$(trans_pairs...)],
             ($(map(esc, rates)...),),
             $(auto_self),
+            $coupling_expr,
         )
     end
 end

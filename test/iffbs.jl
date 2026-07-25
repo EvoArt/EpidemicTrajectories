@@ -187,7 +187,7 @@ end
         I -> S = 0.2
     end
 
-    hand_written = function (model, data, X, s, i, t; reverse=false)
+    hand_written = function (model, data, X, s, i, t, reverse=false)   # reverse POSITIONAL
         if s == 2
             data.aggregates[:mine][data.group[i], t] += reverse ? -1 : 1
         end
@@ -207,7 +207,7 @@ end
     # and it round-trips like a generated one
     hand_written(nothing, data, nothing, 2, 1, 1)
     @test data.aggregates[:mine][1, 1] == 1
-    hand_written(nothing, data, nothing, 2, 1, 1; reverse=true)
+    hand_written(nothing, data, nothing, 2, 1, 1, true)
     @test data.aggregates[:mine][1, 1] == 0
 end
 

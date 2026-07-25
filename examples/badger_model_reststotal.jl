@@ -119,7 +119,7 @@ end
 
 # nSE / nSS: susceptible-neighbour move counts per (group, time). Reversible
 # integer aggregates, exactly like n_infectious / n_alive.
-function _summary_nSE_rt(model, data, X, s, i, t; reverse=false)
+function _summary_nSE_rt(model, data, X, s, i, t, reverse=false)
     g = data.social_group[i, t]
     g > 0 || return nothing
     t == data.n_timepoints && return nothing
@@ -130,7 +130,7 @@ function _summary_nSE_rt(model, data, X, s, i, t; reverse=false)
               (data.aggregates.nSE[g, t] += contrib)
     nothing
 end
-function _summary_nSS_rt(model, data, X, s, i, t; reverse=false)
+function _summary_nSS_rt(model, data, X, s, i, t, reverse=false)
     g = data.social_group[i, t]
     g > 0 || return nothing
     t == data.n_timepoints && return nothing
@@ -236,7 +236,7 @@ end
 
 # n_infectious / n_alive count summaries, hand-written (verbose fallback, since we
 # mix them with the nSE/nSS summaries). Same as badger_model_foicache.jl's.
-function _summary_n_infectious_rt(model, data, X, s, i, t; reverse=false)
+function _summary_n_infectious_rt(model, data, X, s, i, t, reverse=false)
     g = data.social_group[i, t]
     g > 0 || return nothing
     contrib = (s == _I_CODE)
@@ -244,7 +244,7 @@ function _summary_n_infectious_rt(model, data, X, s, i, t; reverse=false)
               (data.aggregates.n_infectious[g, t] += contrib)
     nothing
 end
-function _summary_n_alive_rt(model, data, X, s, i, t; reverse=false)
+function _summary_n_alive_rt(model, data, X, s, i, t, reverse=false)
     g = data.social_group[i, t]
     g > 0 || return nothing
     contrib = (s != _D_CODE)

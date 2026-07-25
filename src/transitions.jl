@@ -51,7 +51,7 @@ function transition_matrix_at!(P, rowsum, trans_mat::TransitionSpec, model, data
     # every call — this is the hub of the package, so that cost lands everywhere.
     # `_fill_rates!` recurses over the tuple instead, specialising on one rate at a
     # time, which keeps each call concrete.
-    _fill_rates!(P, rowsum, trans_mat.rate_fns, trans_mat.transitions, 1, model, data, i, t)
+    _fill_rates!(P, rowsum, trans_mat.rate_fns, trans_mat.transitions, 1, model, data, X, i, t)
 
     for a in 1:N
         P[a, a] += (1 - rowsum[a])
@@ -80,41 +80,69 @@ function transition_prob(trans_mat::TransitionSpec, model, data::EpidemicData, X
     T = _param_eltype(model)
     p_to = zero(T)          # mass on the requested move
     rowsum = zero(T)        # total mass leaving `from` via declared transitions
-    _accum_row(trans_mat.rate_fns, trans_mat.transitions, 1, from, to, model, data, i, t,
+    _accum_row(trans_mat.rate_fns, trans_mat.transitions, 1, from, to, model, data, X, i, t,
                p_to, rowsum, T)
+end
+
+# Evaluate one rate, temporarily re-adding the focal individual in source state
+# `a` (with destination `b`) so rate functions that read aggregates see the right
+# denominator. The aggregate update is reversed immediately and `X` is restored.
+@inline function _call_rate_with_focal(rate, model, data::EpidemicData, X, i, t, a, b)
+    # `focal_self_contribution=false` opts out entirely: the focal then sees the
+    # leave-one-out aggregates (the pre-fix behaviour), which is correct only when
+    # the user's own rate functions re-add the focal themselves. See `epidemic_data`.
+    if data.focal_self_contribution && data._focal[] == i
+        if t < data.n_timepoints
+            old_next = X[t + 1, i]
+            X[t + 1, i] = b
+            apply_summaries!(data.derived_summaries, model, data, X, a, i, t, false)
+            p = rate(model, data, i, t)
+            apply_summaries!(data.derived_summaries, model, data, X, a, i, t, true)
+            X[t + 1, i] = old_next
+            return p
+        else
+            apply_summaries!(data.derived_summaries, model, data, X, a, i, t, false)
+            p = rate(model, data, i, t)
+            apply_summaries!(data.derived_summaries, model, data, X, a, i, t, true)
+            return p
+        end
+    end
+    return rate(model, data, i, t)
 end
 
 # Walk the rate tuple once, accumulating only what the `from` row needs: the
 # requested entry, and the row's total (for the self-transition's leftover).
 # Recursive for the same reason as `_fill_rates!` — one concrete rate type per step.
-@inline function _accum_row(::Tuple{}, transitions, k, from, to, model, data, i, t, p_to, rowsum, ::Type{T}) where {T}
+@inline function _accum_row(::Tuple{}, transitions, k, from, to, model, data, X, i, t, p_to, rowsum, ::Type{T}) where {T}
     # A self-transition takes the mass the declared transitions leave behind.
     return from == to ? p_to + (one(T) - rowsum) : p_to
 end
-@inline function _accum_row(rates::Tuple, transitions, k, from, to, model, data, i, t, p_to, rowsum, ::Type{T}) where {T}
+@inline function _accum_row(rates::Tuple, transitions, k, from, to, model, data, X, i, t, p_to, rowsum, ::Type{T}) where {T}
     @inbounds f, s = transitions[k]
-    if _state_index(data, f) == from
-        p = clamp(first(rates)(model, data, i, t), 1e-12, 1 - 1e-12)
+    a = _state_index(data, f)
+    if a == from
+        b = _state_index(data, s)
+        p = clamp(_call_rate_with_focal(first(rates), model, data, X, i, t, a, b), 1e-12, 1 - 1e-12)
         rowsum += p
-        _state_index(data, s) == to && (p_to += p)
+        b == to && (p_to += p)
     end
-    return _accum_row(Base.tail(rates), transitions, k + 1, from, to, model, data, i, t,
+    return _accum_row(Base.tail(rates), transitions, k + 1, from, to, model, data, X, i, t,
                       p_to, rowsum, T)
 end
 
 # Recurse over the rate tuple one element at a time. Each step sees a concrete
 # function type, so the call devirtualises and the arithmetic stays unboxed.
-@inline _fill_rates!(P, rowsum, ::Tuple{}, transitions, k, model, data, i, t) = nothing
-@inline function _fill_rates!(P, rowsum, rates::Tuple, transitions, k, model, data, i, t)
+@inline _fill_rates!(P, rowsum, ::Tuple{}, transitions, k, model, data, X, i, t) = nothing
+@inline function _fill_rates!(P, rowsum, rates::Tuple, transitions, k, model, data, X, i, t)
     @inbounds begin
         from_sym, to_sym = transitions[k]
         a = _state_index(data, from_sym)
         b = _state_index(data, to_sym)
-        p = clamp(first(rates)(model, data, i, t), 1e-12, 1 - 1e-12)
+        p = clamp(_call_rate_with_focal(first(rates), model, data, X, i, t, a, b), 1e-12, 1 - 1e-12)
         P[a, b] += p
         rowsum[a] += p
     end
-    return _fill_rates!(P, rowsum, Base.tail(rates), transitions, k + 1, model, data, i, t)
+    return _fill_rates!(P, rowsum, Base.tail(rates), transitions, k + 1, model, data, X, i, t)
 end
 
 # The working number type: whatever number type the parameters are made of. Under

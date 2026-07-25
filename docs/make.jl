@@ -23,6 +23,7 @@ makedocs(
         "Home" => "index.md",
         "Tutorials" => [
             "Fitting a model with a PPL" => "tutorials/cattle_iffbs.md",
+            "Making a model fast" => "tutorials/optimization.md",
         ],
         "API" => "api.md",
     ],

@@ -47,7 +47,7 @@ profiling: this alone accounted for the bulk of a ~6x gap between the badger
 model's iFFBS sweep and its reference-implementation counterpart, matching the
 same pattern found earlier for `trans_mat` — see the devlog/repro log for both.
 """
-struct EpidemicData{SS,OP,RC,EX<:NamedTuple,AG<:NamedTuple,RF<:Tuple,DS<:Tuple}
+struct EpidemicData{SS,OP,OW,RC,EX<:NamedTuple,AG<:NamedTuple,RF<:Tuple,DS<:Tuple}
     n_individuals::Int
     n_timepoints::Int
     n_states::Int
@@ -57,10 +57,25 @@ struct EpidemicData{SS,OP,RC,EX<:NamedTuple,AG<:NamedTuple,RF<:Tuple,DS<:Tuple}
     sampling_period::Vector{Tuple{Int,Int}}
     trans_mat::TransitionSpec{RF}
     starting_state::SS
+    # The observation model comes in two shapes. `observation_process` returns the
+    # whole per-state weight VECTOR (what the filter needs); `observation_weight`
+    # returns ONE state's weight as a SCALAR (what the likelihood needs, allocation-
+    # free). A user may supply either or both — see `epidemic_data`. When only the
+    # scalar is given the package derives the vector from it for the filter; when
+    # only the vector is given, `observation_weight` is `nothing` here.
     observation_process::OP
+    observation_weight::OW
     derived_summaries::DS
     rest_contribution::RC
     affected_individuals::Union{Nothing,Matrix{Vector{Int}}}
+    # `_focal` names the individual currently being resampled (or -1), so a rate
+    # evaluated inside that individual's own forward filter can transiently re-add
+    # its own contribution and see the RIGHT denominator — see
+    # `_call_rate_with_focal` (transitions.jl). `focal_self_contribution` gates
+    # that machinery: leave it `true` unless your rate functions already do the
+    # focal's own accounting themselves (see `epidemic_data`'s docstring).
+    _focal::Base.RefValue{Int}
+    focal_self_contribution::Bool
     extras::EX
     aggregates::AG
 end
@@ -161,10 +176,28 @@ Build the [`EpidemicData`](@ref) for a model.
   the individual's first timepoint.
 - `aggregates`: normally an [`@aggregate`](@ref) declaration — the package
   allocates the arrays and takes the reversible updates from it.
-- `observation_process`: `(model, data, X, i, t) -> per-state weight vector`, the
-  likelihood of individual `i`'s observations at `t` under each state. Defaults
-  to [`no_observations`](@ref). The package has no idea what you observe — supply
-  this for any model with data.
+- `observation_process`: `(model, data, X, i, t) -> per-state weight VECTOR`, the
+  likelihood of individual `i`'s observations at `t` under each state. The package
+  has no idea what you observe — supply this (or `observation_weight`) for any
+  model with data.
+- `observation_weight`: `(model, data, X, i, t, s) -> the SCALAR weight for state
+  `s`` — the same information as `observation_process`, one state at a time. **This
+  is the recommended form for performance**: the likelihood needs only the one
+  entry `w[X[t,i]]`, so the scalar avoids allocating a whole weight vector per
+  `(i, t)` under AD (on the badger model, ~187k arrays of Duals and 18 MB per
+  gradient call — see [`epidemic_obs_loglik`](@ref)). You may supply **either or
+  both**:
+    * only `observation_weight` — the package derives the filter's vector from it
+      by looping over states (that vector is built only inside the never-
+      differentiated filter, so it costs nothing on the gradient), and
+      [`epidemic_obs_loglik`](@ref)`(data)` picks up the fast scalar automatically;
+    * only `observation_process` — works unchanged, but the likelihood indexes the
+      vector (correct, just allocates);
+    * both — used exactly as given. Needed when the likelihood's factor is not a
+      plain restriction of the filter's vector (e.g. the badger model, whose filter
+      sees `capture × tests` but whose likelihood scores only the `tests` factor,
+      capture being conjugate). When both are set they MUST agree entry-for-entry.
+  Defaults to [`no_observations`](@ref) when neither is given.
 - `sampling_period`: `(first, last)` timepoint per individual. Defaults to
   `(1, n_timepoints)` for everyone.
 - `affected_individuals`: who each individual's state affects, indexed `[t, i]`,
@@ -187,6 +220,18 @@ Build the [`EpidemicData`](@ref) for a model.
   just the rate it evaluates. Defaults to `nothing`, meaning
   [`make_rest_contribution`](@ref)'s brute-force counterfactual loop. See its own
   section further down before using this.
+- `focal_self_contribution`: default `true`. While the iFFBS filter resamples an
+  individual, that individual is reversed out of the aggregates (leave-one-out).
+  A rate the filter evaluates for the focal's OWN move (e.g. a frequency-dependent
+  force of infection reading a per-group alive/infected count) would then see a
+  denominator missing the focal itself — `M-1` instead of `M`. With this `true`
+  the package re-adds the focal transiently around each such rate call so it sees
+  the right denominator (the reference's `M+1`), then reverses it — user rate
+  functions need no change. Set it `false` ONLY if your rate functions already do
+  the focal's own accounting themselves (an explicit `+1`/`M+1` term); doing so
+  skips the re-insertion machinery (a per-focal-rate `apply_summaries!` pair — see
+  the performance note on [`iffbs!`](@ref)), and the package prints a warning
+  because results are WRONG if that assumption does not hold.
 - `derived_summaries`: only needed with the verbose fallback (see below).
 - `extras...`: anything else your functions need — covariates, test matrices,
   capture histories, time-varying group membership. Reachable as `data.name`. The
@@ -195,7 +240,8 @@ Build the [`EpidemicData`](@ref) for a model.
 **Verbose fallback** (for an aggregate `@aggregate` cannot express): pass
 `aggregates` as a plain `Dict{Symbol,Any}` of your own arrays and
 `derived_summaries` as a collection of functions
-`(model, data, X, s, i, t; reverse=false)` that honour `reverse` themselves — a
+`(model, data, X, s, i, t, reverse=false)` that honour `reverse` themselves (it is
+passed POSITIONALLY, so accept it as a positional arg, not a keyword) — a
 `Tuple` is preferred (each summary keeps its own concrete type all the way
 through, same reasoning as `TransitionSpec`'s `rate_fns`), but any iterable
 works: it is converted with `Tuple(...)`.
@@ -297,14 +343,16 @@ this — a `rest_contribution` the package knows nothing about beyond its
 signature, backed by aggregates the package equally knows nothing about.
 """
 function epidemic_data(; n_individuals, n_timepoints, trans_mat,
-                         coupling_trans_mat=trans_mat,
+                         coupling_trans_mat=nothing,
                          starting_state, aggregates,
                          group=ones(Int, n_individuals),
-                         observation_process=no_observations,
+                         observation_process=nothing,
+                         observation_weight=nothing,
                          sampling_period=nothing,
                          affected_individuals=nothing,
                          coupled_transitions=nothing,
                          rest_contribution=nothing,
+                         focal_self_contribution::Bool=true,
                          state_space=trans_mat.states, derived_summaries=nothing,
                          extras...)
     # An @aggregate declaration carries both the storage to allocate and the
@@ -350,10 +398,17 @@ function epidemic_data(; n_individuals, n_timepoints, trans_mat,
         coupled_transition_mask(state_space, coupled_transitions)
 
     affected_ids = (data, t, i) -> affected_individuals[t, i]
-    # The coupling term is the only rate consumer that is never differentiated, so
-    # it is the only one that may safely use a spec with cached, parameter-derived
-    # rates. Defaults to `trans_mat` — see this function's docstring.
-    neighbor_logprob = make_neighbor_logprob_from_transitions(coupling_trans_mat)
+    # Which spec the coupling scores neighbours against. Resolution, in order:
+    #   1. an explicit `coupling_trans_mat` the user passed — always wins;
+    #   2. else `trans_mat`'s survival-free `coupling` view, if `@survival` built one
+    #      — this is what keeps a neighbour's own survival OUT of the coupling, so a
+    #      small survival cannot annihilate the infection signal (see TransitionSpec);
+    #   3. else `trans_mat` itself (no survival, so nothing to strip).
+    # The coupling term is the only rate consumer that is never differentiated, so it
+    # is also the only one that may safely use a spec with cached rates.
+    coupling_spec = coupling_trans_mat !== nothing ? coupling_trans_mat :
+        (trans_mat.coupling !== nothing ? trans_mat.coupling : trans_mat)
+    neighbor_logprob = make_neighbor_logprob_from_transitions(coupling_spec)
     # `make_rest_contribution`'s brute-force counterfactual loop is the DEFAULT,
     # not the only option — a motivated user who knows their coupling structure
     # (e.g. it factors through a per-group running total, as the reference
@@ -364,6 +419,37 @@ function epidemic_data(; n_individuals, n_timepoints, trans_mat,
         make_rest_contribution(affected_ids=affected_ids,
                                 neighbor_logprob=neighbor_logprob,
                                 coupled_mask=coupled_mask)
+
+    # Resolve the observation model. A user may give the per-state weight VECTOR
+    # (`observation_process`), the scalar single-state weight (`observation_weight`),
+    # or both. The filter needs a vector; the likelihood wants the scalar. So:
+    #   * only the scalar given  -> derive the vector for the filter by looping the
+    #     scalar over states (the vector is built only inside the filter, which is
+    #     never differentiated, so its allocation is harmless — and the fast scalar
+    #     still reaches the likelihood via `epidemic_obs_loglik(data)`);
+    #   * only the vector given  -> unchanged behaviour (scalar stays `nothing`, the
+    #     likelihood falls back to indexing the vector — correct, just allocates);
+    #   * both given             -> used exactly as supplied (the badger split, where
+    #     the likelihood's factor is not a plain restriction of the filter's vector);
+    #   * neither                -> `no_observations` (the honest default).
+    n_states = length(state_space)
+    if observation_process === nothing && observation_weight !== nothing
+        ow = observation_weight
+        observation_process = (model, data, X, i, t) ->
+            [ow(model, data, X, i, t, s) for s in 1:n_states]
+    elseif observation_process === nothing
+        observation_process = no_observations
+    end
+
+    # A one-time construction warning, never on the hot path: opting out of the
+    # focal re-insertion is correct only if the user's rate functions do the
+    # focal's own denominator accounting themselves.
+    focal_self_contribution || @warn(
+        "epidemic_data: `focal_self_contribution=false` — the package will NOT " *
+        "re-add the focal individual to its own transition-rate aggregates during " *
+        "the iFFBS filter. Results are WRONG unless your rate functions account " *
+        "for the focal's own contribution themselves (e.g. an explicit `+1`/`M+1` " *
+        "in the force of infection). Only set this if you have supplied such rates.")
 
     EpidemicData(
         n_individuals,
@@ -376,9 +462,12 @@ function epidemic_data(; n_individuals, n_timepoints, trans_mat,
         trans_mat,
         starting_state,
         observation_process,
+        observation_weight,
         Tuple(derived_summaries),
         rest_contribution,
         affected_individuals,
+        Ref(-1),
+        focal_self_contribution,
         NamedTuple(extras),
         aggregates isa NamedTuple ? aggregates : NamedTuple(aggregates),
     )

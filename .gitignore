@@ -2,7 +2,7 @@ Manifest.toml
 /docs/build/
 /docs/Manifest.toml
 /examples/Manifest.toml
-/badger_ref/
+#/badger_ref/
 *.jl.cov
 *.jl.*.cov
 *.jl.mem
@@ -18,3 +18,8 @@ examples/_*.jl
 smoke_err.txt
 # Cygwin/Git-Bash crash artifacts
 *.stackdump
+
+# Root-level generated fit outputs (large JLD2/CSV draws)
+/outputs/
+/badger_out/
+/badger_ref/

@@ -118,8 +118,78 @@ filter never place a pre-entry death), so the pre-entry window contains only
 alive->alive moves. If your model can place death before entry, do not use this
 gate.
 
-The starting-state term is unchanged (it applies at the individual's own start,
-where the nu mixing is defined).
+The starting-state term is scored at each individual's OWN window start
+(`sampling_period[i][1]`), where the nu mixing is defined and where iFFBS stores
+the drawn initial state — NOT at absolute time 1.
+
+## The power-user path: copy this body and hand-optimize it
+
+The whole point of this package is that the likelihood is an ORDINARY function you
+can read, copy, and replace. `epidemic_loglik` returns a generic closure that
+works for ANY model spec — which means it goes through indirections (`data.trans_mat`,
+`data.starting_state`, `transition_prob` walking the rate tuple) that a model
+written by hand for ONE fixed spec does not need. When the generic version is not
+fast enough, drop to a bespoke `loglik` for your model. The closure this function
+returns is, verbatim, the loop below — start from this and specialize it:
+
+```julia
+# A hand-written equivalent of the closure `epidemic_loglik(data; entry_time, survival)`
+# returns. Copy it, then specialize for YOUR model (see the levers underneath).
+function my_loglik(model, data, X)
+    ll = zero(eltype(model.some_continuous_param))   # element type follows the params (AD)
+
+    for i in 1:data.n_individuals
+        first_t, last_t = data.sampling_period[i]
+
+        # starting state at the individual's own window start
+        p0 = data.starting_state(model, data, X, i, first_t)
+        ll += log(p0[X[first_t, i]] + 1e-12)
+
+        entry_i = data.first_capture_time[i]         # or first_t if not conditioning on entry
+        for t in first_t:min(last_t, data.n_timepoints) - 1
+            # the ONE transition this individual actually made (fused survival * move)
+            p = transition_prob(data.trans_mat, model, data, X, i, t, X[t, i], X[t + 1, i])
+            ll += log(p + 1e-12)
+
+            # pre-entry: divide the survival factor back out (subtract its log)
+            if t < entry_i
+                s = my_survival(model, data, i, t)   # SAME survival used in trans_mat
+                ll -= log(s + 1e-12)
+            end
+        end
+    end
+    ll
+end
+```
+
+Levers a bespoke version can pull that the generic one cannot:
+
+  * **Analytic survival / rates.** `transition_prob` calls YOUR rate functions
+    through a tuple walk. If your survival has a closed form (e.g. a Siler or
+    Gompertz `exp`), inline it and its derivative here instead of routing through
+    the generic `@transitions` dispatch. Hard-code the `(from, to)` branch for your
+    state space rather than clamping and summing an arbitrary row.
+
+  * **Condition on entry with FEWER calls.** The gate above evaluates survival
+    TWICE per pre-entry step: once fused inside `transition_prob`, once as
+    `my_survival` to subtract back out. A bespoke pre-entry branch can compute the
+    disease-MOVE directly (`log(infection)` / `log(1-progRate)` / …) in ONE
+    transcendental, never forming `survival * move` at all. On a dataset with a
+    large pre-entry window (the badgers: ~9452 steps) this roughly halves the
+    gate's added cost.
+
+  * **Skip work you know is zero.** The generic loop runs to `last_t` and scores
+    post-death `D -> D` steps as `log(1) ≈ 0`; a bespoke loop can stop at the
+    imputed death time (as the reference's `lastObsAliveTimes` does) and drop
+    those iterations entirely.
+
+  * **Non-allocating starting state.** `data.starting_state` here returns a fresh
+    vector per individual; a bespoke term can index the one state it needs without
+    allocating (the same trick `observation_weight` uses for the obs term).
+
+A worked, staged version of exactly this — naive spec → `@aggregate` →
+`logProbRest` + custom coupling → hand-written likelihood — is in the optimization
+example in the docs.
 """
 function epidemic_loglik(data::EpidemicData; entry_time=nothing, survival=nothing)
     et = entry_time
@@ -259,11 +329,19 @@ and this term calls it with `s = X[t, i]`, never materialising a vector. It must
 agree with `observation_process` entry-for-entry; supplying both and letting them
 disagree silently changes the posterior, so verify them against each other.
 
-When omitted (the default), the vector path is used — correct, just slower.
+Both arguments **default to whatever `data` carries** (`data.observation_weight`
+and `data.observation_process`). So the recommended path is to give the scalar to
+[`epidemic_data`](@ref) once — as `observation_weight`, or as the second half of a
+both-supplied observation model — and then just call `epidemic_obs_loglik(data)`:
+it picks up the stored scalar automatically and takes the fast, allocation-free
+path. Pass these keywords here only to override what `data` stores (e.g. the badger
+model, which stores the full `capture × tests` vector for the filter but passes
+only the `tests` factor here). When `data` carries no scalar and none is passed,
+the vector path is used — correct, just slower.
 """
 function epidemic_obs_loglik(data::EpidemicData;
                              observation_process=data.observation_process,
-                             observation_weight=nothing)
+                             observation_weight=data.observation_weight)
     obs = observation_process
     obsw = observation_weight
 

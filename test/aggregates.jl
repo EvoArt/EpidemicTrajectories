@@ -37,7 +37,7 @@ end
     # applying the infected state increments; reversing it puts the count back
     summary(model, data, X, 2, 1, 1)                      # individual 1, group 1, t=1, state I
     @test data.aggregates[:n_infected][1, 1] == 1
-    summary(model, data, X, 2, 1, 1; reverse=true)
+    summary(model, data, X, 2, 1, 1, true)               # reverse is POSITIONAL now
     @test data.aggregates[:n_infected][1, 1] == 0
 
     # the susceptible state contributes nothing either way
@@ -49,7 +49,7 @@ end
         summary(model, data, X, s, i, t)
     end
     for s in (1, 2), i in (1, 2), t in 1:3
-        summary(model, data, X, s, i, t; reverse=true)
+        summary(model, data, X, s, i, t, true)
     end
     @test all(iszero, data.aggregates[:n_infected])
 end

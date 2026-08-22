@@ -210,8 +210,94 @@ they are the ones whose groupmates also have windows ending early. For the worst
 144–148) — both at `t == last_t(j)`, both reading an `X[t+1, j]` outside `j`'s
 window.
 
-Left unfixed deliberately: the fix belongs in `make_rest_contribution` and changes
-what `iffbs!` computes, so it needs its own measured commit. Pinned by a test
+#### How it manifests, and why nobody noticed
+
+**Silent, structurally.** No error, no warning, no `NaN`, nothing out of range.
+`X[t+1, j]` is not garbage memory — it is state 1 (`S`), so the filter reads a
+valid state and computes a valid probability. Nothing can detect it locally.
+
+The right name for it is a **phantom susceptible**: a badger whose monitoring has
+ended is still treated as a live, susceptible groupmate making an `S -> S` move.
+
+It does NOT cancel in `rest_contribution`'s `logw .-= maximum(logw)`, because the
+spurious term is not constant across the focal's candidate states:
+
+```
+s =      S       E       I       D
+       -0.025  -0.025  -0.578  -0.025      <- measured, i=1972, j=2214, t=143
+```
+
+The asymmetry sits entirely on `I`: a phantom neighbour "did not get infected",
+which is evidence *against* the focal being infectious. The filter's rest weight
+for `I` drops from 0.575 to 0.331. So the bias has a systematic direction —
+**prevalence is pushed DOWN**, hardest for animals in groups where other members'
+monitoring has ended.
+
+Scale on the badger data:
+
+| | |
+|---|---|
+| phantom neighbour visits | 28,027 / 13,761,958 — **0.20%** |
+| filter cells with ≥1 phantom | 4,131 / 185,001 — **2.2%** |
+| individuals touched at least once | 1,614 / 2,384 — **68%** |
+| mean per-cell weight distortion | 0.055 (max 0.67) |
+
+A small, diffuse tilt across two thirds of the population — exactly the shape that
+reads as a slightly-off posterior rather than a visible failure. It also needs
+per-individual window ends to exist at all (identically zero on the uniform-window
+cattle and synthetic models), and it is invisible to the aggregate-consistency
+test, because the aggregates stay perfectly consistent with `X` throughout. The
+filter was simply never checked against the likelihood until `check_iffbs_exact`.
+
+#### The Julia reference does NOT have this bug, and that pins the root cause
+
+The reference marks every out-of-window cell of `Xinit` with the sentinel `-10`
+("not monitored") — all 197,366 of them, and nothing else — and `getLogProbRest`
+(`updaters.jl:202`) gates on `X[jj, tt] in (0, 1, 3)`, the LIVE states. `-10` fails
+that gate, the individual's `logProbRest[:, jj, tt]` stays zero, and it contributes
+nothing to the coupling. **Zero out-of-window cells are ever scored.** That is not
+a window check; it is an accidental-but-robust guard — a sentinel state that a
+liveness test happens to exclude.
+
+**We break it at IMPORT, not in the sampler.** `badger_common.jl:88` reads
+
+```julia
+X_init[t, i] = code == -10 ? 1 : REF_STATE_CODE[Int(code)]
+```
+
+which flattens the sentinel to state 1. It is a reasonable-looking choice — `X` is
+a `Matrix{Int}` of valid state indices and the state space has no "unknown" — but
+it turns 196,974 "not monitored" cells into live susceptibles, and
+`make_rest_contribution` has no liveness or window gate to catch them.
+
+So the causal chain is: **sentinel flattened to `S` on import, plus no gate in the
+coupling.** The reference blocks it at the first step; we would fix it at the
+second. This also explains why no ET-vs-reference comparison ever surfaced it — the
+reference was never doing the thing we were doing.
+
+*Corollary for the tau investigation:* this biases ET's prevalence downward
+relative to a correct sampler, and the reference does not share it. A small
+systematic ET-vs-reference difference that existed independently of everything
+chased in that investigation.
+
+#### Which fix
+
+Two candidates:
+
+1. **A window check in `make_rest_contribution`** — skip `j` at `t` unless
+   `first_t(j) <= t <= min(last_t(j), n_timepoints) - 1`, the same predicate
+   `_neighbor_conditional` already uses.
+2. **A liveness gate**, mirroring the reference — skip neighbours in a
+   non-contributing state.
+
+**Take (1).** It is what `epidemic_loglik` actually scores, it fixes every model
+rather than the ones whose state space happens to have a dead state, and it does
+not require the package to know which states count as "live" — which would violate
+the central design rule about never assuming what states mean.
+
+Left unfixed here deliberately: it changes what `iffbs!` computes, so it needs its
+own measured commit, and it will move sampler output on any model with
+per-individual end times (the badger results included). Pinned by a test
 (`test/iffbs_mh.jl`, "a window ending before n_timepoints is NOT exact") so it
 cannot regress silently, and corrected in the meantime by the MH step.
 
@@ -904,7 +990,9 @@ shape: a per-individual conditional target is a reusable seam, not MH plumbing.
    and the joint says the filter is the wrong side. The fix is a window check
    inside `make_rest_contribution` — skip neighbour `j` at `t` unless
    `first_t(j) <= t <= last_t(j) - 1`, the same predicate
-   `epidemic_conditional_loglik`'s `:likelihood` rule already uses.
+   `epidemic_conditional_loglik`'s `:likelihood` rule already uses. (NOT the
+   reference's liveness gate — see §1.3(d) for why the window is the better rule
+   for a package that assumes nothing about what states mean.)
 
    It changes what `iffbs!` computes, so: its own commit, measured alone, with
    `test/iffbs_mh.jl`'s "a window ending before n_timepoints is NOT exact" flipping

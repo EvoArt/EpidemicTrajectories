@@ -300,21 +300,21 @@ end
     end
 end
 
-@testset "check_iffbs_exact: a window ending before n_timepoints is NOT exact" begin
-    # A REAL, PRE-EXISTING mismatch in `iffbs!`, found by this check and left
-    # unfixed here on purpose (fixing it changes the sampler, which is a separate
-    # measured change — see CLAUDE.md "measure each change alone").
+@testset "windows ending before n_timepoints: the coupling respects them" begin
+    # REGRESSION TEST for a real bug that `check_iffbs_exact` found and that is now
+    # fixed in `make_rest_contribution`.
     #
-    # `forward_filter!` calls `rest_contribution` at every t in the focal's window,
-    # INCLUDING its last one. At `t == last_t` the coupling term scores each
-    # neighbour's `t -> t+1` move. When that neighbour's own window also ends at
-    # `last_t`, the joint contains no such factor — `epidemic_loglik` stops at
-    # `last_t - 1` — and `X[t+1, j]` is a cell the sampler never writes. So the
-    # filter is scoring a term that is not in the target, off stale data.
+    # `forward_filter!` calls `rest_contribution` at every t in the FOCAL's window,
+    # including its last, and the coupling term then scores each neighbour's
+    # `t -> t+1` move. When the NEIGHBOUR's own window ends at or before `t`, the
+    # joint contains no such factor — `epidemic_loglik` scores `j`'s steps over
+    # `first_t(j) : last_t(j) - 1` — and `X[t+1, j]` is a cell the model never
+    # defines and iFFBS never writes.
     #
-    # It cannot bite when every window ends at `n_timepoints`, because
-    # `rest_contribution` returns all-ones at `t == n_timepoints`. It CAN bite any
-    # model with per-individual end times (the badger model has them).
+    # Before the fix this measured `max |log alpha| = 0.16` here and 0.586 on the
+    # real badger data (11 of 1974 badgers). It cannot bite when every window ends
+    # at `n_timepoints`, because `rest_contribution` returns all-ones at
+    # `t == n_timepoints`; it bites any model with per-individual end times.
     s = _mh_setup(; n_t=10, sampling_period=[(2, 9) for _ in 1:6],
                     results=_random_results(StableRNG(30), 10, 6))
     data = s.data
@@ -322,18 +322,60 @@ end
     _sync!(_MH_PARS, data, X)
 
     rep = check_iffbs_exact(_MH_PARS, data, X; rng=StableRNG(32), n_sweeps=2)
-    @test !rep.exact
-    @test rep.max_abs_logratio > 1e-3
+    @test rep.n_checked > 3
+    @test rep.exact
+    @test rep.max_abs_logratio < 1e-8
 
-    # ... and `neighbor_window=:filter` reproduces what the filter actually does,
-    # so the ratio goes back to 1. That is a diagnosis, not a fix: with `:filter`
-    # the conditional is no longer a restriction of the joint (asserted in the
-    # delta-consistency testset above), so the MH step would be correcting towards
-    # the wrong target.
+    # `neighbor_window=:filter` drops the neighbour's-own-window restriction from
+    # the CONDITIONAL, so it still sums terms the joint does not contain — here
+    # the `(j, 9)` pairs, where every neighbour's window has just ended.
+    #
+    # Those extra terms do NOT show up in the acceptance ratio: they enter
+    # `logpi_cur` and `logpi_can` identically whenever the two paths agree at
+    # t == 9, so they cancel. `check_iffbs_exact` is therefore blind to them, and
+    # asserting `!exact` here would be asserting something the ratio cannot see.
+    # Compare the CONDITIONALS directly instead, which is where the difference
+    # actually lives.
     filter_target = epidemic_conditional_loglik(data; neighbor_window=:filter)
-    rep2 = check_iffbs_exact(_MH_PARS, data, X; rng=StableRNG(32), n_sweeps=2,
-                             target=filter_target)
-    @test rep2.exact
+    lik_target = epidemic_conditional_loglik(data)
+    @test any(1:data.n_individuals) do i
+        !isapprox(filter_target(_MH_PARS, data, X, i),
+                  lik_target(_MH_PARS, data, X, i); atol=1e-8)
+    end
+    # ... and only `:likelihood` is a restriction of the joint (the
+    # delta-consistency testset above asserts both directions of that).
+end
+
+@testset "make_rest_contribution: skips neighbours outside their own window" begin
+    # Directly, without going through the MH machinery: a neighbour whose window
+    # has closed must not move the focal's coupling weights at all.
+    n_t = 10
+    # j=2's window ends at 5; everyone else runs the full length.
+    windows = [(1, n_t), (1, 5), (1, n_t), (1, n_t), (1, n_t), (1, n_t)]
+    s = _mh_setup(; n_t=n_t, sampling_period=windows,
+                    results=_random_results(StableRNG(40), n_t, 6))
+    data = s.data
+    X = epidemic_simulator(data)(StableRNG(41), _MH_PARS)
+    _sync!(_MH_PARS, data, X)
+
+    i, j = 1, 2
+    @test j in data.affected_individuals[7, i]      # still declared as affected
+
+    # At t=7, j is outside its window, so dropping it from the affected list must
+    # change nothing. (Before the fix this differed.)
+    aff = data.affected_individuals[7, i]
+    with = data.rest_contribution(_MH_PARS, data, X, i, 7, data.n_states, aff)
+    without = data.rest_contribution(_MH_PARS, data, X, i, 7, data.n_states,
+                                     filter(!=(j), aff))
+    @test with ≈ without atol = 1e-12
+
+    # At t=3, j IS inside its window and its state genuinely matters, so dropping
+    # it MUST change the weights — otherwise the test above passes vacuously.
+    aff3 = data.affected_individuals[3, i]
+    with3 = data.rest_contribution(_MH_PARS, data, X, i, 3, data.n_states, aff3)
+    without3 = data.rest_contribution(_MH_PARS, data, X, i, 3, data.n_states,
+                                      filter(!=(j), aff3))
+    @test !isapprox(with3, without3; atol=1e-8)
 end
 
 @testset "check_iffbs_exact: reports a real mismatch" begin

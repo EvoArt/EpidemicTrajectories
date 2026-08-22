@@ -961,6 +961,18 @@ shape: a per-individual conditional target is a reusable seam, not MH plumbing.
 
 ## 10. Decisions — resolved, and what is still open
 
+> **UNVERIFIED — possible speed regression in the window-check fix.** The fix for
+> §1.3(d) landed without a trustworthy benchmark. It removes ~0.2% of neighbour
+> visits but adds two integer comparisons and a `sampling_period` load per visit,
+> in the package's hottest loop. The attempt to measure it was abandoned because
+> the machine was busy and unplugged: the same code read 3.7–6.7 s/sweep across
+> runs, and an interleaved in-process A/B was never completed. **Re-measure on a
+> quiet machine.** If it does cost something, the obvious remedy is to hoist the
+> check out of the `for s in 1:n_states` loop (it does not depend on `s`), which
+> would make it `|affected|` comparisons per `(i, t)` instead of
+> `n_states × |affected|`.
+
+
 1. ~~**`focal_self_contribution = false` is an error in v1**~~ — **shipped that
    way.** `_check_mh_supported` refuses it at sweep level with a message pointing
    at §2.4. Revisit only with a concrete model that needs it.

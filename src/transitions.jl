@@ -41,6 +41,64 @@ the caller is done with it (the iFFBS forward filter, which needs every
 timepoint's matrix alive for the backward pass, allocates one `P` per timepoint
 but shares one `rowsum` across all of them — see `forward_filter`).
 """
+# --- Closing a row -----------------------------------------------------------
+#
+# `auto_self` gives a state's self-transition whatever mass the declared
+# transitions out of it leave behind: `P[a, a] = 1 - rowsum[a]`. That is only a
+# probability if `rowsum[a] <= 1`, and NOTHING guarantees it.
+#
+# `_fill_rates!` / `_accum_row` clamp each declared rate INDIVIDUALLY to
+# `(1e-12, 1 - 1e-12)`. Three declared moves out of one state, each a legal 0.4,
+# give `rowsum = 1.2` and a self-transition of `-0.2`. The per-rate clamp cannot
+# see this, because it never looks at the row total.
+#
+# What happened next was not a graceful degradation: `epidemic_loglik` does
+# `log(p + 1e-12)`, and `log(-0.2 + 1e-12)` is a `DomainError` that takes the
+# chain down. It also reached the iFFBS filter, where a negative entry corrupts
+# the forward recursion silently — a row of `[-1.7, 0.9, 0.9, 0.9]` still sums to
+# 1.0, so the normalisation looks fine and the filtered distribution is nonsense.
+#
+# It bites hardest on models that SPLIT a state (several susceptible classes, a
+# stratified population): each split adds another declared transition to the row,
+# so the slack that a two-state model always had disappears, and an HMC proposal
+# that pushes one hazard up during adaptation tips the row over.
+#
+# ## Why not simply floor the leftover at zero
+#
+# `max(0, 1 - rowsum)` stops the crash, and that alone is worth having. But it
+# leaves the row summing to `rowsum` rather than 1 — 2.7, in the case above — so
+# the transition matrix is no longer stochastic, the filter's normalisation
+# silently reweights, and, worse, `d(self)/d(rate) == 0` in the floored region:
+# the sampler gets NO gradient signal telling it to come back. A loud failure is
+# traded for a quiet one.
+#
+# ## What this does instead
+#
+# When the declared mass overflows, RESCALE the row to close it: every declared
+# rate is divided by `rowsum` and the self-transition takes the remaining
+# `eps_self`. The row sums to 1 by construction, every entry stays positive, and
+# — the point — the result still varies smoothly with every rate, so the gradient
+# keeps pointing back towards the feasible region.
+#
+# Below the overflow threshold nothing changes at all: `rowsum <= 1 - eps_self`
+# takes the original `1 - rowsum` path, bit for bit. This is a guard on a region
+# the model should never occupy, not a change to the model.
+#
+# `eps_self` is the floor left for the self-transition, so `log(P[a, a])` stays
+# finite for a caller that does not add its own guard.
+const _EPS_SELF = 1e-12
+
+@inline function _close_row(rowsum::T, eps_self=T(_EPS_SELF)) where {T}
+    # Returns (scale, self): multiply each declared rate by `scale`, and give the
+    # self-transition `self`. The common case is scale == 1.
+    if rowsum <= one(T) - eps_self
+        return one(T), one(T) - rowsum
+    end
+    # Overflow: rescale the declared mass into `1 - eps_self` and keep the row
+    # closed. Differentiable in `rowsum`, which is what preserves the gradient.
+    return (one(T) - eps_self) / rowsum, eps_self
+end
+
 function transition_matrix_at!(P, rowsum, trans_mat::TransitionSpec, model, data::EpidemicData, X, i, t)
     N = data.n_states
     fill!(P, zero(eltype(P)))
@@ -53,8 +111,17 @@ function transition_matrix_at!(P, rowsum, trans_mat::TransitionSpec, model, data
     # time, which keeps each call concrete.
     _fill_rates!(P, rowsum, trans_mat.rate_fns, trans_mat.transitions, 1, model, data, X, i, t)
 
-    for a in 1:N
-        P[a, a] += (1 - rowsum[a])
+    # Close each row. `_close_row` returns `(1, 1 - rowsum)` in the normal case,
+    # so this is the previous behaviour exactly; only an overflowing row is
+    # rescaled. See `_close_row` for why rescaling beats flooring at zero.
+    @inbounds for a in 1:N
+        scale, self = _close_row(rowsum[a])
+        if scale != one(scale)
+            for b in 1:N
+                P[a, b] *= scale
+            end
+        end
+        P[a, a] += self
     end
     P
 end
@@ -115,7 +182,11 @@ end
 # Recursive for the same reason as `_fill_rates!` — one concrete rate type per step.
 @inline function _accum_row(::Tuple{}, transitions, k, from, to, model, data, X, i, t, p_to, rowsum, ::Type{T}) where {T}
     # A self-transition takes the mass the declared transitions leave behind.
-    return from == to ? p_to + (one(T) - rowsum) : p_to
+    # MUST agree with `transition_matrix_at!` entry for entry — the likelihood
+    # reads this and the filter reads that, and the whole package assumes they are
+    # the same number. `test/spec.jl` checks it for every (from, to).
+    scale, self = _close_row(rowsum)
+    return from == to ? p_to * scale + self : p_to * scale
 end
 @inline function _accum_row(rates::Tuple, transitions, k, from, to, model, data, X, i, t, p_to, rowsum, ::Type{T}) where {T}
     @inbounds f, s = transitions[k]
@@ -290,6 +361,30 @@ must be reversible.
 - `affected_ids`: `(data, t, i) -> individuals affected by i at time t`.
 - `neighbor_logprob`: `(model, data, X, j, t, updated_id) -> log-probability of j's
   realized move` — see [`make_neighbor_logprob_from_transitions`](@ref).
+
+## Sampling windows
+
+!!! warning "UNVERIFIED: possible speed regression"
+    The window check below has **not** been benchmarked. It skips ~0.2% of
+    neighbour visits on the badger model (so it does slightly LESS
+    `neighbor_logprob` work) but adds two integer comparisons and a tuple load
+    per visit, inside the package's hottest loop. A first attempt to measure it
+    was abandoned because the machine was too noisy to trust: readings ranged
+    3.7-6.7 s/sweep on the SAME code. Measure it properly on a quiet machine
+    before assuming it is free, per CLAUDE.md's benchmarking rule.
+
+A neighbour `j` is scored at time `t` only when `t` lies inside `j`'s own
+`sampling_period` and leaves room for a step, i.e.
+`first_t(j) <= t < min(last_t(j), n_timepoints)`. Outside that range `j` has no
+`t -> t+1` move: [`epidemic_loglik`](@ref) scores none, so a term scored here would
+not be in the target density, and `X[t + 1, j]` would be a cell the model never
+defines.
+
+This matters only for models with per-individual windows — with the default
+`sampling_period` of `(1, n_timepoints)` for everyone, the check never fires. If
+you write your OWN `rest_contribution`, apply the same restriction; the exactness
+of the iFFBS sweep depends on it, and [`check_iffbs_exact`](@ref) will tell you if
+you have not.
 """
 function make_rest_contribution(; normalize=true, min_logprob=-1e12, affected_ids,
                                   neighbor_logprob, coupled_mask=nothing)
@@ -307,6 +402,35 @@ function make_rest_contribution(; normalize=true, min_logprob=-1e12, affected_id
 
             acc = 0.0
             for j in ids
+                # A neighbour is only informative about the focal if it HAS a
+                # `t -> t+1` move for the model to explain. Outside `j`'s own
+                # sampling period there is none: `epidemic_loglik` scores `j`'s
+                # steps over `first_t(j) : last_t(j) - 1` and nothing else, so a
+                # term scored here for any other `t` is not in the target density
+                # at all — and `X[t + 1, j]` is a cell the model never defines and
+                # iFFBS never writes.
+                #
+                # This is not a judgement about what the user's
+                # `affected_individuals` "meant". It reads `sampling_period`,
+                # which the package already owns, and it keeps the filter scoring
+                # exactly the factors `epidemic_loglik` scores. Skipping is exact
+                # in the same sense `coupled_mask` is.
+                #
+                # It bit the badger model, silently, and had to be found with
+                # `check_iffbs_exact`: `Xinit` fills unmonitored cells with the
+                # SUSCEPTIBLE state, so an out-of-window neighbour read as a live
+                # groupmate making an `S -> S` move — a phantom susceptible whose
+                # "failure to get infected" was evidence against the focal being
+                # infectious. Measured: the focal's `I` weight pushed 0.575 ->
+                # 0.331, a systematic downward bias on prevalence over 68% of the
+                # population. The Julia reference avoids it a different way, by
+                # keeping a `-10` "not monitored" sentinel that its liveness gate
+                # rejects; we cannot copy that, because the package must not
+                # assume which states count as "live".
+                @inbounds begin
+                    first_j, last_j = data.sampling_period[j]
+                    (first_j <= t && t < min(last_j, data.n_timepoints)) || continue
+                end
                 # A neighbour whose realised move is not one the focal can
                 # influence has the same probability under every candidate state,
                 # so it contributes an identical constant that cancels on

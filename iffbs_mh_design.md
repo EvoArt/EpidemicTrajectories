@@ -1,6 +1,24 @@
 # iFFBS-MH in EpidemicTrajectories — design proposal
 
-**Status:** proposal, nothing implemented. **Date:** 2026-08-22.
+**Status:** IMPLEMENTED (commit `8d29404`, branch `iffbs-mh`). Kept as the design
+record; sections marked **UPDATE** carry what implementation and measurement
+changed. **Date:** 2026-08-22.
+
+Shipped: `IFFBSProposal` / `iffbs_proposal` / `uncorrected_proposal` /
+`markov_proposal`; `backward_logq` / `backward_sample_logq!`;
+`epidemic_conditional_loglik`; `default_step_logprob` and the `step_logprob` seam
+on `epidemic_loglik`; `iffbs_mh!` / `iffbs_mh_individual!`; `MHStats` /
+`acceptance_rate` / `identical_rate` / `reset_stats!`; `IFFBSMHSampler` and
+`epidemic_latent_sampler(; mh=true)`; `check_iffbs_exact`. 135 tests in
+`test/iffbs_mh.jl`; whole suite 1077, green.
+
+Four deviations from the plan below, each forced by measurement and documented in
+place: `reset!` became `reset_stats!` (too generic to export); the RNG-stream test
+runs under `force=:accept` (§6 UPDATE); `data.neighbor_logprob` is derived from
+the TARGET spec rather than from `coupling_trans_mat` (§4.2 UPDATE); and MHiFFBS
+turned out **1.4-1.5x faster** than the exact sweep, not the wash predicted
+(§3.1 UPDATE, which also records the two benchmarking traps that at one point had
+it reading 0.64x).
 
 Grounded in:
 
@@ -124,6 +142,28 @@ a path that dies pre-entry the row entry is `1 - p_surv`, which the gate's
 The badger observation process is believed to do exactly that, which is why nothing
 has gone visibly wrong. But "believed to" is the wrong basis, and the ratio-1
 diagnostic of §7 answers it in one run.
+
+**UPDATE 2026-08-22, after implementation.** `check_iffbs_exact` on a `@survival`
+model with uniform windows returns `exact=true`, `max |log α| = 1.4e-10` over 240
+decisions — confirming empirically that the survival factor cancels and that the
+survival-free coupling view introduces no error. The entry gate itself still needs
+running against the real badger data; see §10.5.
+
+**And the check found a DIFFERENT mismatch that this document did not predict.**
+`forward_filter!` calls `rest_contribution` at every `t` in the focal's window,
+including its last. At `t == last_t` the coupling scores each neighbour's
+`t -> t+1` move — but when that neighbour's own window also ends at `last_t`, the
+joint contains no such factor (`epidemic_loglik` stops at `last_t - 1`) and
+`X[t+1, j]` is a cell the sampler never writes. So the filter scores a term that is
+not in the target, off stale data. It cannot bite when every window ends at
+`n_timepoints` (`rest_contribution` returns all-ones there); it CAN bite any model
+with per-individual end times, which includes the badger model. Measured
+`max |log α| = 0.16` on a six-individual test model.
+
+Left unfixed deliberately: fixing it changes what `iffbs!` computes, which is a
+separate change to measure on its own. Pinned by a test
+(`test/iffbs_mh.jl`, "a window ending before n_timepoints is NOT exact") so it
+cannot regress silently, and corrected in the meantime by the MH step.
 
 **(b) `coupling_trans_mat`.** `epidemic_data` accepts a separate spec for the
 coupling term, sold in CLAUDE.md as safe because "the cache equals the true
@@ -291,20 +331,56 @@ forward filter. With the changed-timepoint restriction of §2.1 they cost much l
 
 ### 3.1 Performance: state the claim honestly
 
-**MHiFFBS is not a speed play in this package, and the doc should say so.** The
-temptation is: the coupling term was ~70% of an iFFBS sweep, so dropping it from
-the filter is a huge win. It is not, for two reasons.
+**MEASURED 2026-08-22, after implementation.** SEID model, 120 individuals in 8
+groups of 15, 40 timepoints, `N = 4`, `@survival`, noisy test, no HMC
+(`examples/iffbs_mh_walkthrough.jl`). Both regimes, warmed up, `X` reset to the
+same start every repetition, minimum of 8 × 5 sweeps:
+
+| | `iffbs!` | MHiFFBS | speedup | acceptance | coupling share of the exact sweep |
+|---|---|---|---|---|---|
+| strong coupling (β = 0.55) | 11.28 ms | **7.67 ms** | 1.47× | 0.656 | 79% |
+| weak coupling (β = 0.03) | 8.47 ms | **6.06 ms** | 1.40× | 0.995 | 76% |
+
+So MHiFFBS **is** a speed play after all, contrary to what §3.1 originally
+predicted — but a bounded one, and the bound is the arithmetic:
 
 1. Dropping the coupling from the filter saves `N × |A|` neighbour visits per
-   timepoint but the ratio still needs `2 × |A|` of them (cur and can) — the saving
-   is `N/2 ≈ 2×` on the coupling term, not elimination.
-2. Since the 2026-07-20 fixes, iFFBS is **~17% of a badger sweep** and the gradient
-   is ~83% (CLAUDE.md). A 2× saving on part of 17% is at best ~8% of a sweep, before
-   the MH step's own costs are subtracted.
+   timepoint, but the ratio still needs `2 × |A|` of them (cur and can). The saving
+   is `N/2` on the coupling term — `2×` at `N = 4` — not elimination. With the
+   coupling at ~78% of the sweep, `1/(0.22 + 0.78/2) ≈ 1.6×` is the ceiling, and
+   1.4–1.5× is what lands.
+2. **How much that is worth depends entirely on iFFBS's share of YOUR sweep.**
+   Above it is the whole sweep. On the badger model, since the 2026-07-20 fixes,
+   iFFBS is ~17% and the gradient ~83% (CLAUDE.md), so the same 1.5× buys ~6% of a
+   sweep.
+3. **A low acceptance rate costs twice.** An accept costs the same summary passes
+   as a plain iFFBS sweep; a reject costs an extra reverse/apply round trip. So a
+   bad proposal mixes worse *and* runs slower.
 
-So: build this for **correctness** — semi-Markov targets, mismatched proposals, and
-the ability to *know* whether the sampler is exact. Any speed benefit is incidental
-and must be measured, alone, per CLAUDE.md's rule.
+Acceptance matches the paper's ">0.84 for all values of C considered" (§4.2) in the
+weakly coupled case and drops to 0.66 in the strongly coupled one — the paper's own
+"depends on how important the missing arrows were" (§4.3), visible in one number.
+
+> **Two measurement traps, both hit while producing the table above, both of which
+> reversed the conclusion.** Recorded because they are easy to repeat.
+>
+> 1. **No warm-up.** The timed loop for whichever method ran second absorbed its
+>    own JIT compilation.
+> 2. **Letting `X` drift between repetitions.** This is the subtle one. The two
+>    methods walk to *different* parts of the state space — `iffbs!` reached 57%
+>    infected while MHiFFBS was still at 41% — and a sweep's cost depends on where
+>    it is. Timing each from wherever it happened to have drifted compares two
+>    different workloads. It reported **0.64×** for something that is really
+>    **1.47×**, and it did so stably across runs, so it did not look like noise.
+>
+> Reset `X` to the same start every repetition, warm both up, take the minimum.
+> This is the CLAUDE.md rule about verifying the harness can detect the effect,
+> applied to a benchmark rather than a correctness check.
+
+None of which changes the priority: build this for **correctness** first —
+semi-Markov targets, mismatched proposals, and the ability to *know* whether the
+sampler is exact. The speed is a real but model-dependent bonus, and must be
+measured on the model in question.
 
 ---
 
@@ -364,6 +440,24 @@ The neighbour sum needs `neighbor_logprob` and `coupled_mask`, which
 (`data.jl:418-428`). **Store them on `EpidemicData` as fields** so the conditional
 can reuse the identical function — that is what makes exactness structural rather
 than a coincidence two constructors happen to agree on.
+
+> **UPDATE 2026-08-22 — "the identical function" was too strong, and storing it
+> literally broke the headline diagnostic.** `epidemic_data` builds the filter's
+> coupling scorer from `coupling_trans_mat` when the user supplies one. Storing
+> *that* made `check_iffbs_exact` compare the approximation against itself: a
+> `coupling_trans_mat` with twice the true transmission produced a maximum
+> `|log α|` of 2.2e-11, i.e. "exact". Precisely the failure §1.3(b) named it for.
+>
+> The shipped version stores a scorer derived from the TARGET `trans_mat` — or its
+> survival-free `coupling` view when `@survival` built one, which is exact because
+> a neighbour's own survival does not depend on the focal and so cancels — and
+> deliberately IGNORES a `coupling_trans_mat` override. The two then agree exactly
+> when the cache is honest and disagree when it has drifted. Pinned by
+> `test/iffbs_mh.jl`, "check_iffbs_exact: reports a real mismatch".
+>
+> Also: the signature gained `neighbor_logprob`, `coupled_mask`, `neighbor_window`
+> and `min_logprob` keywords, and dropped `coupled_transitions` (the mask is what
+> the conditional actually needs, and `data` already carries it).
 
 > **The mismatch hazard, stated once.** `entry_time` / `survival` here MUST match
 > what was given to `epidemic_loglik`, and `observation_process` here MUST be the
@@ -529,6 +623,27 @@ proposal == target, `α ≡ 1`, no RNG is consumed by the accept step, and
 `iffbs_mh!` must reproduce `iffbs!` draw for draw under the same seed. That is a
 far stronger test than "the answers look similar".
 
+> **UPDATE 2026-08-22.** Copied, and it works — but the test as stated does NOT
+> hold, for a reason worth recording. With proposal == target the *exact* ratio is
+> 0; the *computed* one is a difference of sums of order 1e-14 whose sign is
+> arbitrary. A ratio of `-1e-16` takes the `log(rand(rng)) < logratio` branch,
+> consumes a variate, and then accepts anyway — same trajectory, different stream.
+>
+> Split in two rather than papered over with a tolerance (treating
+> `|log α| ≤ tol` as an automatic accept would trade a real, if tiny, bias for a
+> cosmetic property): stream equivalence is tested under `force=:accept`, and the
+> no-`rand()` rule gets its own test comparing the RNG state after a sweep that
+> accepts on its own merits against one that was forced to. The SIZE of the ratio
+> is what `check_iffbs_exact` measures.
+>
+> Building "accepts on its own merits" has its own trap: a large path-dependent
+> bonus such as `1e6 * sum(X[:, i])` is NOT enough, because its sign follows
+> whichever path has more infected cells and about half the ratios come out
+> negative — a test that then measures nothing. The shipped test uses a strictly
+> increasing counter: the kernel evaluates the target twice per decision, current
+> first and candidate second, so every candidate is larger by a fixed margin that
+> swamps any proposal-density difference.
+
 **Copy: the identical-proposal early exit.** `x_can == x_cur` skips the whole
 target evaluation. Cheap, and common at high acceptance.
 
@@ -689,15 +804,16 @@ an `on_nonfinite = :error` mode for debugging.
 
 ## 9. Phasing
 
-| Phase | Content | Gate |
-|---|---|---|
-| **0** | `IFFBSProposal`; `forward_filter!` takes it; default reproduces today | test 0 (bit-identical) |
-| **1** | `backward_score` / `backward_sample_logq!`; store `neighbor_logprob` + `coupled_mask` on `EpidemicData`; `epidemic_conditional_loglik` | test 1 |
-| **2** | `iffbs_mh!`, `MHStats`, `epidemic_latent_sampler(; mh)` | tests 2, 3, 4, 5, 6, 9 |
-| **3** | `TargetSpec` + `step_logprob`, shared by `epidemic_loglik` and the conditional; semi-Markov example | test 7 |
-| **4** | `check_iffbs_exact`; run it on the badger model and settle §1.3(a) | — |
-| **5** | Changed-timepoint restriction as a measured optimisation | test 2 must still pass; measure alone |
-| *later* | Static compatibility detection | shelved — see §7 |
+| Phase | Content | Gate | Status |
+|---|---|---|---|
+| **0** | `IFFBSProposal`; `forward_filter!` takes it; default reproduces today | test 0 (bit-identical) | **done** |
+| **1** | `backward_logq` / `backward_sample_logq!`; store `neighbor_logprob` + `coupled_mask` on `EpidemicData`; `epidemic_conditional_loglik` | test 1 | **done** (`backward_score` was renamed `backward_logq`) |
+| **2** | `iffbs_mh!`, `MHStats`, `epidemic_latent_sampler(; mh)` | tests 2, 3, 4, 5, 6, 9 | **done** |
+| **3** | `step_logprob` shared by `epidemic_loglik` and the conditional; semi-Markov example | test 7 | **done** (keywords, not `TargetSpec` — see §10.3) |
+| **4** | `check_iffbs_exact` | — | **done**; not yet run on the real badger data (§10.5) |
+| **5** | Changed-timepoint restriction as a measured optimisation | test 2 must still pass; measure alone | **not started** |
+| — | Fix the window-end coupling mismatch found in §1.3(a) | its test flips to `exact` | **not started**, deliberately |
+| *later* | Static compatibility detection | shelved — see §7 | shelved |
 
 Phases 0 and 1 are worth doing on their own even if MH is never used: Phase 0
 makes the filter's inputs explicit, and Phase 1's `epidemic_conditional_loglik` is
@@ -707,23 +823,38 @@ shape: a per-individual conditional target is a reusable seam, not MH plumbing.
 
 ---
 
-## 10. Decisions needed before implementation
+## 10. Decisions — resolved, and what is still open
 
-1. **`focal_self_contribution = false` is an error in v1** (§2.4). Agree, or is
-   there a live model that needs it?
-2. **New fields on `EpidemicData`** for `neighbor_logprob` and `coupled_mask`
-   (§4.2). Two more type parameters on a struct CLAUDE.md already flags as the
-   package's hub — worth it for structural exactness, but it is a change to the
-   hot type and must be checked with `isconcretetype(fieldtype(...))` on the
-   *whole* field type, per the `trans_mat::TransitionSpec{RF}` precedent.
-3. **`TargetSpec` (Phase 3) vs keyword duplication (Phases 1–2).** The keyword
-   route ships sooner and test 1 guards it; the `TargetSpec` route makes the
-   mismatch unrepresentable. Proposal above is: keywords now, `TargetSpec` in
-   Phase 3, keyword forms retained as wrappers.
-4. **Should `rest_contribution` gain a log-returning sibling?** The conditional
-   does not need it under design (B) of §3 — it scores neighbours directly — but a
+1. ~~**`focal_self_contribution = false` is an error in v1**~~ — **shipped that
+   way.** `_check_mh_supported` refuses it at sweep level with a message pointing
+   at §2.4. Revisit only with a concrete model that needs it.
+2. ~~**New fields on `EpidemicData`**~~ — **shipped.** One new type parameter
+   (`NL`) for `neighbor_logprob`; `coupled_mask` is a deliberate
+   `Union{Nothing,Matrix{Bool}}`, matching `affected_individuals`. Checked with
+   `isconcretetype(fieldtype(...))` over EVERY field of a built instance, per the
+   `trans_mat::TransitionSpec{RF}` precedent — and that check is now a test
+   ("EpidemicData: every field of a built instance is concrete"), so the trap
+   cannot recur silently on the next field someone adds.
+3. **`TargetSpec` — still open, and still worth doing.** Shipped with keywords and
+   test 1 as the guard, which is the weaker of the two options: nothing structural
+   stops a user passing `entry_time` to `epidemic_loglik` and forgetting it in
+   `epidemic_conditional_loglik`. The docstrings say so loudly and the
+   delta-consistency test is easy to copy into a model's own suite, but a
+   `TargetSpec` holding `(entry_time, survival, step_logprob)` once and building
+   both from it would make the mismatch unrepresentable. Recommended next change.
+4. **Should `rest_contribution` gain a log-returning sibling?** Still open, still
+   independent. The conditional scores neighbours directly and does not need it; a
    `rest_log_contribution` would remove an `exp`/`log` round-trip and its underflow
-   risk from the filter's own path. Independent change; measure alone.
-5. **Where does §1.3(a) land?** If `check_iffbs_exact` shows the badger entry gate
-   does bias the filter, the fix is either an MH correction or an entry-aware
-   proposal `trans_mat`. Worth resolving before building on top of it.
+   risk from the filter's own path. Measure alone.
+5. **The badger model has not been checked yet.** `check_iffbs_exact` is built and
+   passes on a synthetic `@survival` model (`max |log α| = 1.4e-10` over 240
+   decisions), but the real question — does the `entry_time` gate, or do the
+   per-individual window ends, bias the badger sampler — needs it run against the
+   badger data. Note §1.3(a)'s UPDATE: the window-end issue will fire there
+   regardless, so run with the entry gate ON and OFF to separate the two effects.
+6. **NEW: fix the window-end coupling mismatch?** (§1.3(a) UPDATE.) The filter
+   scores neighbour moves at `t == last_t` that the joint does not contain, off a
+   cell of `X` the sampler never writes. The fix is a window check inside
+   `make_rest_contribution`; it changes what `iffbs!` computes, so it needs its own
+   measurement and its own commit. Until then the MH step corrects it and a test
+   pins the current behaviour.

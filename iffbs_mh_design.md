@@ -12,6 +12,12 @@ on `epidemic_loglik`; `iffbs_mh!` / `iffbs_mh_individual!`; `MHStats` /
 `epidemic_latent_sampler(; mh=true)`; `check_iffbs_exact`. 135 tests in
 `test/iffbs_mh.jl`; whole suite 1077, green.
 
+**The headline finding.** Running the finished diagnostic on the real badger data
+answered §1.3's open question in both directions: the `entry_time` gate does NOT
+break exactness, and a mismatch this document never predicted DOES — the filter
+scores neighbour moves at the end of an individual's window that the joint does not
+contain. 11 of 1974 badgers, worst `|log α| = 0.586`. See §1.3(a) and §1.3(d).
+
 Four deviations from the plan below, each forced by measurement and documented in
 place: `reset!` became `reset_stats!` (too generic to export); the RNG-stream test
 runs under `force=:accept` (§6 UPDATE); `data.neighbor_logprob` is derived from
@@ -143,25 +149,69 @@ The badger observation process is believed to do exactly that, which is why noth
 has gone visibly wrong. But "believed to" is the wrong basis, and the ratio-1
 diagnostic of §7 answers it in one run.
 
-**UPDATE 2026-08-22, after implementation.** `check_iffbs_exact` on a `@survival`
-model with uniform windows returns `exact=true`, `max |log α| = 1.4e-10` over 240
-decisions — confirming empirically that the survival factor cancels and that the
-survival-free coupling view introduces no error. The entry gate itself still needs
-running against the real badger data; see §10.5.
+**UPDATE 2026-08-22 — RUN ON THE REAL BADGER DATA (2384 badgers x 161
+timepoints), `examples/badger_check_iffbs_exact.jl`.**
 
-**And the check found a DIFFERENT mismatch that this document did not predict.**
+**The entry gate is innocent.** `max |log α|` is bit-identical with the gate ON and
+OFF, at every parameter set tried. The prediction above holds exactly: `@survival`
+contributes one non-state-dependent factor, it cancels on normalisation for every
+path that stays alive, and `badger_obs_capture` gives the dead state zero weight
+before last capture so no other path is reachable. Also confirmed on a synthetic
+`@survival` model (`max |log α| = 1.4e-10` over 240 decisions).
+
+**Two prerequisites had to be right first, and each initially gave a confident
+wrong answer of "grossly inexact".** Both are properties of the DIAGNOSTIC, not of
+the model, and both are now documented in the script:
+
+1. **Burn in.** Run from `raw.X_init` and every ratio is `+Inf` — correctly.
+   `badger_obs_capture` writes a hard structural zero into the dead state's weight
+   while a badger is known alive, so 2377 of 2384 initial paths have
+   `log q(current) = -Inf`: the filter could never have proposed where the chain
+   is, for which accepting unconditionally is the right MH response. After ONE
+   `iffbs!` sweep, 0 of 2384 are unreachable.
+2. **Do not run at `time_stage`'s benchmark parameters.** `a2=3.0, b2=1.7,
+   c1=0.45` make the Siler survival underflow to ~1e-20 by age 5, so
+   `survival × infection` lands on `transition_matrix_at!`'s 1e-12 clamp for
+   **15.7% of all scored transitions**. A clamped probability is constant, so those
+   steps stop responding to the focal and every comparison measures the clamp.
+   This is the survival-annihilation failure the survival-free `coupling` view
+   exists to prevent — and note which way round it falls: the coupling view stays
+   responsive while the full `trans_mat` goes flat. With a survival curve inside
+   the representable range, delta-consistency goes from 2.94 to **1.9e-8**.
+
+### 1.3(d) A mismatch this document did not predict — and it is real on the badgers
+
 `forward_filter!` calls `rest_contribution` at every `t` in the focal's window,
 including its last. At `t == last_t` the coupling scores each neighbour's
-`t -> t+1` move — but when that neighbour's own window also ends at `last_t`, the
-joint contains no such factor (`epidemic_loglik` stops at `last_t - 1`) and
-`X[t+1, j]` is a cell the sampler never writes. So the filter scores a term that is
-not in the target, off stale data. It cannot bite when every window ends at
+`t -> t+1` move — but when that neighbour's own window also ends at `t`, the joint
+contains no such factor (`epidemic_loglik` stops at `last_t(j) - 1`) and
+`X[t+1, j]` is a cell iFFBS never writes. So the filter scores a term that is not
+in the target, off stale data. It cannot bite when every window ends at
 `n_timepoints` (`rest_contribution` returns all-ones there); it CAN bite any model
-with per-individual end times, which includes the badger model. Measured
-`max |log α| = 0.16` on a six-individual test model.
+with per-individual end times.
 
-Left unfixed deliberately: fixing it changes what `iffbs!` computes, which is a
-separate change to measure on its own. Pinned by a test
+**Confirmed on the badger data**, and the diagnosis is airtight because both
+directions were checked:
+
+| | `max \|log α\|` |
+|---|---|
+| `neighbor_window = :likelihood` (the joint's rule) | **0.586**, on 11 of 1974 badgers |
+| `neighbor_window = :filter` (the filter's rule) | 3.3e-8 |
+
+Switching the conditional to the filter's own convention collapses the ratio, which
+proves the discrepancy IS this and nothing else. And the reverse comparison says
+which side is wrong: against the joint's delta, `:likelihood` is exact to ~1e-11
+while `:filter` is off by 0.586. **So the FILTER is the side that needs fixing.**
+
+Every one of the 11 offenders is a badger **born mid-study** (`birth == first_t`) —
+they are the ones whose groupmates also have windows ending early. For the worst
+(i=1972, window 110–161) the filter scores exactly **2** extra `(j, t)` pairs:
+`j=2214` at `t=143` (j's window 134–143) and `j=2281` at `t=148` (j's window
+144–148) — both at `t == last_t(j)`, both reading an `X[t+1, j]` outside `j`'s
+window.
+
+Left unfixed deliberately: the fix belongs in `make_rest_contribution` and changes
+what `iffbs!` computes, so it needs its own measured commit. Pinned by a test
 (`test/iffbs_mh.jl`, "a window ending before n_timepoints is NOT exact") so it
 cannot regress silently, and corrected in the meantime by the MH step.
 
@@ -846,15 +896,18 @@ shape: a per-individual conditional target is a reusable seam, not MH plumbing.
    independent. The conditional scores neighbours directly and does not need it; a
    `rest_log_contribution` would remove an `exp`/`log` round-trip and its underflow
    risk from the filter's own path. Measure alone.
-5. **The badger model has not been checked yet.** `check_iffbs_exact` is built and
-   passes on a synthetic `@survival` model (`max |log α| = 1.4e-10` over 240
-   decisions), but the real question — does the `entry_time` gate, or do the
-   per-individual window ends, bias the badger sampler — needs it run against the
-   badger data. Note §1.3(a)'s UPDATE: the window-end issue will fire there
-   regardless, so run with the entry gate ON and OFF to separate the two effects.
-6. **NEW: fix the window-end coupling mismatch?** (§1.3(a) UPDATE.) The filter
-   scores neighbour moves at `t == last_t` that the joint does not contain, off a
-   cell of `X` the sampler never writes. The fix is a window check inside
-   `make_rest_contribution`; it changes what `iffbs!` computes, so it needs its own
-   measurement and its own commit. Until then the MH step corrects it and a test
-   pins the current behaviour.
+5. ~~**The badger model has not been checked yet.**~~ — **done**, see §1.3(a) and
+   (d). The `entry_time` gate is innocent; the window-end coupling term is not.
+   `examples/badger_check_iffbs_exact.jl` reproduces the whole analysis.
+6. **NEW, and now the top of the queue: fix the window-end coupling mismatch.**
+   (§1.3(d).) Confirmed on real data: 11 of 1974 badgers, worst `|log α| = 0.586`,
+   and the joint says the filter is the wrong side. The fix is a window check
+   inside `make_rest_contribution` — skip neighbour `j` at `t` unless
+   `first_t(j) <= t <= last_t(j) - 1`, the same predicate
+   `epidemic_conditional_loglik`'s `:likelihood` rule already uses.
+
+   It changes what `iffbs!` computes, so: its own commit, measured alone, with
+   `test/iffbs_mh.jl`'s "a window ending before n_timepoints is NOT exact" flipping
+   to `exact` and the badger check's 11 offenders going to 0. Note it will also
+   change the sampler's output on any model with per-individual end times, which is
+   worth saying out loud before it lands on the badger results.

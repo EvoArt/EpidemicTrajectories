@@ -178,12 +178,22 @@ end
 end
 
 """
-    no_rest_contribution(model, data, X, i, t, n_states)
+    no_rest_contribution(model, data, X, i, t, n_states, affected_override=nothing)
 
 A coupling term for models where an individual's state does not enter anyone
 else's transition rates: contributes nothing (all ones).
+
+Also the shape of the paper's "uncorrected" iFFBS proposal
+([`uncorrected_proposal`](@ref)) — a filter that deliberately ignores the coupling
+for speed, whose error the MH step then corrects. Used that way in a plain
+[`iffbs!`](@ref) sweep it targets the wrong conditional.
+
+Takes the optional `affected_override` seventh argument for the same reason the
+default coupling term does: [`forward_filter!`](@ref) looks up
+`affected_individuals[t, i]` once and passes it in, so every `rest_contribution`
+must accept it (and this one ignores it).
 """
-no_rest_contribution(model, data, X, i, t, n_states) = ones(n_states)
+no_rest_contribution(model, data, X, i, t, n_states, affected_override=nothing) = ones(n_states)
 
 """
     make_neighbor_logprob_from_transitions(trans_mat; eps_prob=1e-12)

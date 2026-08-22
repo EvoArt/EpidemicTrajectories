@@ -410,9 +410,13 @@ function epidemic_obs_loglik(data::EpidemicData;
 end
 
 """
-    epidemic_conditional_loglik(data; entry_time, survival, step_logprob,
-                                observation_process, observation_weight,
-                                neighbor_logprob, coupled_mask, neighbor_window)
+    epidemic_conditional_loglik(data; entry_time=nothing, survival=nothing,
+                                step_logprob=nothing,
+                                observation_process=data.observation_process,
+                                observation_weight=data.observation_weight,
+                                neighbor_logprob=data.neighbor_logprob,
+                                coupled_mask=data.coupled_mask,
+                                neighbor_window=:likelihood, min_logprob=-1e12)
         -> conditional
 
 Build the FULL CONDITIONAL of one individual's trajectory:

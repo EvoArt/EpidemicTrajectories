@@ -42,6 +42,7 @@ include("truncate.jl")
 include("lfo.jl")
 include("lfo_score.jl")
 include("lfo_run.jl")
+include("lfo_psis.jl")
 
 # Model specification
 export TransitionSpec, @transitions, @survival
@@ -73,5 +74,6 @@ export Granularity, Joint, Pointwise, ByGroup, cell_of, aggregate_cells
 export LFOResult, WindowResult, elpd, compare, cutoffs, n_informative
 export forward_simulate, score_window, survival_constrained
 export LFOSpec, lfo_cv
+export psis_smooth, psis_ess
 
 end # module EpidemicTrajectories

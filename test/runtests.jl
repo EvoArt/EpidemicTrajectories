@@ -13,4 +13,5 @@ using Statistics: mean
     include("lfo_score.jl")
     include("lfo_run.jl")
     include("lfo_psis.jl")
+    include("lfo_backend.jl")
 end

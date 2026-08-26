@@ -25,6 +25,8 @@ using Random: Random, AbstractRNG
 using Distributions: Distributions
 using StatsFuns: StatsFuns, logsumexp, log1mexp
 using LinearAlgebra: LinearAlgebra
+using Statistics: std, var
+using Printf: @printf
 
 # Include order note: `data.jl` defines the `EpidemicData` type that the other
 # files annotate their arguments with, so it comes before them. Function BODIES
@@ -36,6 +38,7 @@ include("transitions.jl")
 include("iffbs.jl")
 include("build.jl")
 include("truncate.jl")
+include("lfo.jl")
 
 # Model specification
 export TransitionSpec, @transitions, @survival
@@ -61,5 +64,9 @@ export epidemic_simulator, epidemic_loglik, epidemic_obs_loglik, epidemic_latent
 
 # Truncation to a training window, for leave-future-out cross-validation
 export truncation, truncate_data, lfo_cutoffs, TruncationPlan, TruncationRule
+
+# Leave-future-out cross-validation
+export Granularity, Joint, Pointwise, ByGroup, cell_of, aggregate_cells
+export LFOResult, WindowResult, elpd, compare, cutoffs, n_informative
 
 end # module EpidemicTrajectories

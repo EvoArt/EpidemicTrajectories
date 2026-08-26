@@ -39,6 +39,7 @@ include("iffbs.jl")
 include("build.jl")
 include("truncate.jl")
 include("lfo.jl")
+include("lfo_score.jl")
 
 # Model specification
 export TransitionSpec, @transitions, @survival
@@ -68,5 +69,6 @@ export truncation, truncate_data, lfo_cutoffs, TruncationPlan, TruncationRule
 # Leave-future-out cross-validation
 export Granularity, Joint, Pointwise, ByGroup, cell_of, aggregate_cells
 export LFOResult, WindowResult, elpd, compare, cutoffs, n_informative
+export forward_simulate, score_window, survival_constrained
 
 end # module EpidemicTrajectories

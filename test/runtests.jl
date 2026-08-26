@@ -10,4 +10,5 @@ using Statistics: mean
     include("iffbs.jl")
     include("truncate.jl")
     include("lfo.jl")
+    include("lfo_score.jl")
 end

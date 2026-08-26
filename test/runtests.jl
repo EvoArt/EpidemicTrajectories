@@ -8,4 +8,5 @@ using Statistics: mean
     include("spec.jl")
     include("aggregates.jl")
     include("iffbs.jl")
+    include("truncate.jl")
 end

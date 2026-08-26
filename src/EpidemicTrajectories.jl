@@ -35,6 +35,7 @@ include("data.jl")
 include("transitions.jl")
 include("iffbs.jl")
 include("build.jl")
+include("truncate.jl")
 
 # Model specification
 export TransitionSpec, @transitions, @survival
@@ -57,5 +58,8 @@ export iffbs!, iffbs_individual!, forward_filter, backward_sample!
 
 # What a model spec generates
 export epidemic_simulator, epidemic_loglik, epidemic_obs_loglik, epidemic_latent_sampler
+
+# Truncation to a training window, for leave-future-out cross-validation
+export truncation, truncate_data, lfo_cutoffs, TruncationPlan, TruncationRule
 
 end # module EpidemicTrajectories

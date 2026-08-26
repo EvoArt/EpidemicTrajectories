@@ -11,4 +11,5 @@ using Statistics: mean
     include("truncate.jl")
     include("lfo.jl")
     include("lfo_score.jl")
+    include("lfo_run.jl")
 end

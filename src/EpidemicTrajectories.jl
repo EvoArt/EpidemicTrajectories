@@ -26,7 +26,8 @@ using Distributions: Distributions
 using StatsFuns: StatsFuns, logsumexp, log1mexp
 using LinearAlgebra: LinearAlgebra
 using Statistics: std, var
-using Printf: @printf
+using Printf: @printf, @sprintf
+using Serialization: serialize, deserialize
 
 # Include order note: `data.jl` defines the `EpidemicData` type that the other
 # files annotate their arguments with, so it comes before them. Function BODIES
@@ -40,6 +41,7 @@ include("build.jl")
 include("truncate.jl")
 include("lfo.jl")
 include("lfo_score.jl")
+include("lfo_run.jl")
 
 # Model specification
 export TransitionSpec, @transitions, @survival
@@ -70,5 +72,6 @@ export truncation, truncate_data, lfo_cutoffs, TruncationPlan, TruncationRule
 export Granularity, Joint, Pointwise, ByGroup, cell_of, aggregate_cells
 export LFOResult, WindowResult, elpd, compare, cutoffs, n_informative
 export forward_simulate, score_window, survival_constrained
+export LFOSpec, lfo_cv
 
 end # module EpidemicTrajectories

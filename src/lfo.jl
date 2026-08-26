@@ -79,10 +79,18 @@ cell_of(g::ByGroup, i, m) = (g.group[i], m)
 
 Combine per-draw, per-cell log densities into one window score:
 
-    sum over cells c of  logsumexp_s [ logw[s] + cell_lp[s][c] ]
+    sum over cells c of  [ logsumexp_s( logw[s] + cell_lp[s][c] ) - logsumexp_s(logw) ]
 
 `cell_lp[s]` maps cell key to that draw's log density for the cell. `logw` are
-log importance weights (all zero under exact refitting).
+log importance weights; pass zeros under exact refitting.
+
+**The normaliser matters, and getting it wrong is silent.** Each cell's score is
+a self-normalised weighted average over draws, so `logsumexp_s(logw)` must be
+subtracted per cell — with unnormalised weights that is `log S`. Omit it and every
+cell is inflated by `log S`, so a pointwise total (many cells) gains
+`n_cells * log S` over a joint total (one cell). Both totals stay finite and
+plausible; only the comparison between them is destroyed, and nothing about the
+numbers looks wrong.
 
 A cell that is `-Inf` for EVERY draw makes the whole window `-Inf`, which is
 honest: no draw could explain that observation. A cell that is `-Inf` for SOME
@@ -95,6 +103,7 @@ function aggregate_cells(logw::AbstractVector{<:Real},
         throw(ArgumentError("$(length(logw)) weights for $S draws"))
     keys_all = Set{Any}()
     for d in cell_lp, k in keys(d); push!(keys_all, k); end
+    lognorm = logsumexp(logw)
     total = 0.0
     buf = Vector{Float64}(undef, S)
     for k in keys_all
@@ -103,7 +112,7 @@ function aggregate_cells(logw::AbstractVector{<:Real},
         end
         # StatsFuns.logsumexp returns -Inf for an all--Inf input, which is what a
         # cell no draw can explain should score.
-        total += logsumexp(buf)
+        total += logsumexp(buf) - lognorm
         isfinite(total) || return -Inf
     end
     total

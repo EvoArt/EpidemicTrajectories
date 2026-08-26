@@ -9,9 +9,10 @@
 
 using StatsFuns: logsumexp
 
-# A reference scorer with no bucketing at all: one logsumexp over draws of the
-# summed log density. This is what `Joint()` must reproduce.
-_unbucketed(logw, per_draw_total) = logsumexp(logw .+ per_draw_total)
+# A reference scorer with no bucketing at all: one self-normalised weighted
+# average over draws of the summed log density. This is what `Joint()` must
+# reproduce. Note the normaliser -- see the `log S` regression test below.
+_unbucketed(logw, per_draw_total) = logsumexp(logw .+ per_draw_total) - logsumexp(logw)
 
 "Random per-draw, per-cell log densities plus their per-draw sums."
 function _fake_cells(rng, S, N, M)
@@ -87,6 +88,33 @@ end
     # window is -Inf under both. That is honest, not a bug.
     for s in 1:S; lp[s][(1, 1)] = -Inf; end
     @test aggregate_cells(logw, lp) == -Inf
+end
+
+@testset "aggregate_cells: the per-cell normaliser is not optional" begin
+    # REGRESSION. Each cell is a self-normalised weighted average over draws, so
+    # logsumexp_s(logw) must be subtracted PER CELL -- log S with flat weights.
+    # Omit it and every cell gains log S, so a pointwise total (many cells) is
+    # inflated by n_cells * log S over a joint total (one cell). Both totals stay
+    # finite and plausible; only the comparison between them is destroyed.
+    #
+    # Pinned against a hand-computed value rather than against another
+    # aggregation: comparing two of our own estimators to each other would have
+    # missed this entirely.
+    S, C = 4, 3
+    v = -0.5
+    lp = [Dict{Any,Float64}(c => v for c in 1:C) for _ in 1:S]
+    logw = zeros(S)
+    # every draw gives every cell exactly `v`, so each cell's average IS `v`,
+    # and the window is C * v. No log S anywhere.
+    @test isapprox(aggregate_cells(logw, lp), C * v; atol = 1e-12)
+
+    # and the same holds for one cell, which is the Joint() case
+    @test isapprox(aggregate_cells(logw, [Dict{Any,Float64}(1 => v) for _ in 1:S]),
+                   v; atol = 1e-12)
+
+    # non-flat weights: still a weighted average, so a constant cell is unchanged
+    w = [log(1.0), log(3.0), log(2.0), log(4.0)]
+    @test isapprox(aggregate_cells(w, lp), C * v; atol = 1e-12)
 end
 
 @testset "aggregate_cells: shape errors" begin

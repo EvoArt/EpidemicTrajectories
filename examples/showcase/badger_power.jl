@@ -342,23 +342,24 @@ end
 model = badger(data, loglik, obs_loglik, raw.n_groups, raw.n_tests,
                raw.n_seasons, raw.n_nu_times, raw.n_timepoints, raw.n_individuals)
 
-# Hand-tuned step sizes, as NAMED pairs. The metric is one flat vector whose
-# order must match the block's; `check_step_sizes` asserts that rather than
-# leaving it to a comment.
+# The continuous parameters, sampled together in one block.
 const HMC_NAMES = (:tau, :alpha, :lambda, :beta, :q, :c1, :a2, :b2,
                    :thetas, :rhos, :phis)
 
-eps = hmc_step_sizes(
-    :tau => 0.002, :alpha => (0.2, raw.n_groups), :lambda => 0.01, :beta => 0.05,
-    :q => 0.05, :c1 => 0.02, :a2 => 0.001, :b2 => 0.001,
-    :thetas => (0.005, raw.n_tests), :rhos => (0.005, raw.n_tests),
-    :phis => (0.005, raw.n_tests))
-check_step_sizes(eps, HMC_NAMES)
-
 sampler = Gibbs(
-    # `n_steps = 15` matches the C++ reference's EXPECTED trajectory length (it
-    # draws L uniform on 1..30, mean 15.5), not its nominal L = 30.
-    HMC_NAMES => hmc_block(eps, 15),
+    # AdaptiveHMC learns its metric and step size during warm-up, exactly as
+    # NUTS does, then holds both fixed for sampling -- a constant `n_leapfrog`
+    # steps per iteration, no tree doubling.
+    #
+    # This replaces a hand-tuned diagonal metric. A fixed metric has to be right
+    # in both ORDER and SCALE, and a scale far too small gives a chain that never
+    # moves while acceptance still reads healthy. That is not hypothetical: the
+    # metric this script used to carry, lifted from a Siler variant of the model,
+    # left the block completely frozen at sd = 0 on every parameter.
+    #
+    # `n_leapfrog = 15` matches the C++ reference's EXPECTED trajectory length
+    # (it draws L uniform on 1..30, mean 15.5), not its nominal L = 30.
+    HMC_NAMES => AdaptiveHMC(0.8; n_leapfrog = 15, metric = :dense),
 
     :etas => capture_prob_kernel(:etas;
         caught = raw.capture, effort = raw.capt_effort, group = raw.social_group,
@@ -445,8 +446,19 @@ apply_derived_summaries!((;), data, X0)
 const ADTYPE = AutoPolyesterForwardDiff(; chunksize = nothing, tag = nothing)
 
 t0 = time()
+# Every parameter gets an explicit starting value. Without one, a parameter is
+# initialised from a DRAW OF ITS OWN PRIOR -- `tau ~ Exponential(100)` then
+# starts near 100, and a short chain looks like it found a posterior there when
+# it has only failed to leave its start.
+init = (; X = X0,
+        tau = 5.0, alpha = fill(0.5, raw.n_groups), lambda = 0.5, beta = 0.3,
+        q = 0.2, c1 = 0.45, a2 = 0.05, b2 = 0.3,
+        thetas = fill(0.3, raw.n_tests), rhos = fill(0.5, raw.n_tests),
+        phis = fill(0.5, raw.n_tests), etas = fill(0.3, raw.n_seasons),
+        nu = fill(0.05, raw.n_nu_times, 2))
+
 chain = AbstractMCMC.sample(StableRNG(13), model, sampler, n_sweeps;
-                            init        = (; X = X0),
+                            init        = init,
                             adtype      = ADTYPE,
                             # X is 2384 x 161 Ints per sweep. Keep it live for
                             # conditioning, stream it to disc, keep it out of the

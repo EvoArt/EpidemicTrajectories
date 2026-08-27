@@ -290,8 +290,19 @@ X0 = copy(raw.X_init)
 reset_aggregates!(data)
 apply_derived_summaries!((;), data, X0)
 
+# Every parameter gets an explicit starting value. Without one, a parameter is
+# initialised from a DRAW OF ITS OWN PRIOR -- `tau ~ Exponential(100)` then
+# starts near 100, and a short chain looks like it has found a posterior around
+# there when it has only failed to leave its start.
+init = (; X = X0,
+        tau = 5.0, alpha = fill(0.5, raw.n_groups), lambda = 0.5, beta = 0.3,
+        q = 0.2, c1 = 0.45, a2 = 0.05, b2 = 0.3,
+        thetas = fill(0.3, raw.n_tests), rhos = fill(0.5, raw.n_tests),
+        phis = fill(0.5, raw.n_tests), etas = fill(0.3, raw.n_seasons),
+        nu = fill(0.05, raw.n_nu_times, 2))
+
 chain = AbstractMCMC.sample(StableRNG(13), model, sampler, n_sweeps;
-                            init = (; X = X0),
+                            init = init,
                             # X is 2384 x 161 per sweep: keep it live for
                             # conditioning, but out of the chain object.
                             save_states = (X = :buffer,))

@@ -78,3 +78,53 @@ end
     @test st.by_node isa Dict
     @test isempty(st.by_node)
 end
+
+@testset "collect_sweep refuses a partial sweep" begin
+    # A total over 4 of 5 windows is not comparable with one over 5, and
+    # `compare`'s refusal to mix cutoff sets is undone if a partial sweep can
+    # masquerade as a whole one. So this errors rather than returning what it has.
+    dir = mktempdir()
+    be = SlurmArray(partition = "p")
+    h = SweepHandle(String[], joinpath(dir, "m"), dir, 5, be)
+
+    mk(t) = LFOResult([WindowResult(t, Dict(:pointwise => -10.0 - t), 4,
+                                    Dict(:pointwise => 4), Dict(:pointwise => 3),
+                                    7, 1.0, 0.1)],
+                      [:pointwise], 1, 2, Dict{Symbol,Any}())
+    for i in 0:3
+        open(f -> Serialization.serialize(f, mk(i + 1)), EpidemicTrajectories._item_file(dir, i), "w")
+    end
+    @test_throws ErrorException collect_sweep(h)      # 4 of 5: refused
+
+    open(f -> Serialization.serialize(f, mk(5)), EpidemicTrajectories._item_file(dir, 4), "w")
+    res = collect_sweep(h)
+    @test length(res.windows) == 5
+    @test [w.cutoff for w in res.windows] == [1, 2, 3, 4, 5]   # sorted by cutoff
+    @test isfinite(elpd(res, :pointwise))
+end
+
+@testset "resubmit: builds a manifest of only the missing items" begin
+    dir = mktempdir()
+    be = SlurmArray(partition = "p", script = "s.jl")
+    h = SweepHandle(String[], joinpath(dir, "m"), dir, 6, be)
+    for i in (0, 1, 4)
+        write(EpidemicTrajectories._item_file(dir, i), "done")
+    end
+
+    # No sbatch in CI, so this exercises the manifest-building half; the
+    # submission half is covered by write_sbatch's own tests.
+    h2 = resubmit(h)
+    @test h2.outdir == dir
+    items = parse.(Int, readlines(h2.manifest))
+    @test items == [2, 3, 5]                     # exactly the ones with no result
+
+    # exclude must reach the new backend -- this is the bad-node lever, and the
+    # whole reason resubmit takes the argument at all
+    h3 = resubmit(h; exclude = ["node-bad"])
+    @test h3.backend.exclude == ["node-bad"]
+    @test h3.backend.partition == "p"            # everything else carried over
+
+    # nothing missing: a no-op that returns the same handle, not an error
+    for i in 0:5; write(EpidemicTrajectories._item_file(dir, i), "done"); end
+    @test resubmit(h) === h
+end

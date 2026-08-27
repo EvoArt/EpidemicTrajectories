@@ -131,6 +131,7 @@ export forward_simulate, score_window, survival_constrained
 export LFOSpec, lfo_cv
 export psis_smooth, psis_ess
 export LocalBackend, SlurmArray, SweepHandle, sweep_status, work_item, write_sbatch
+export resubmit, collect_sweep
 export AdaptTrace, record!, check_adaptation, flat_likelihood_range
 
 end # module EpidemicTrajectories

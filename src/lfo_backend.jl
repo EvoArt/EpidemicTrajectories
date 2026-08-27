@@ -156,3 +156,74 @@ function _failures_by_node(h::SweepHandle)
     end
     counts
 end
+
+"""
+    resubmit(h::SweepHandle; exclude=nothing, partition=nothing) -> SweepHandle
+
+Resubmit only the work items that have no result yet.
+
+Missing items are read from disk by [`sweep_status`](@ref), so a task that died
+before writing anything is correctly counted as missing. `exclude` and
+`partition` override the original backend's, which is what you want after a
+per-node failure tally has told you where the failures went:
+
+```julia
+st = sweep_status(h)
+st.by_node                       # Dict("node-bad" => 174)
+h2 = resubmit(h; exclude = ["node-bad"])
+```
+
+Returns a NEW handle covering only the resubmitted items; keep both, or call
+`sweep_status` on each. Results land in the same output directory, so a later
+`collect_sweep` sees the union.
+"""
+function resubmit(h::SweepHandle; exclude = nothing, partition = nothing)
+    h.backend isa SlurmArray ||
+        throw(ArgumentError("resubmit needs a scheduler backend, got $(typeof(h.backend))"))
+    st = sweep_status(h)
+    isempty(st.missing) && (@info "nothing missing"; return h)
+
+    be = h.backend
+    exclude === nothing || (be = SlurmArray(; partition = be.partition, cpus = be.cpus,
+        mem = be.mem, time = be.time, exclude = collect(String, exclude),
+        julia = be.julia, project = be.project, script = be.script,
+        extra = be.extra, max_array_index = be.max_array_index))
+    partition === nothing || (be = SlurmArray(; partition = String(partition),
+        cpus = be.cpus, mem = be.mem, time = be.time, exclude = be.exclude,
+        julia = be.julia, project = be.project, script = be.script,
+        extra = be.extra, max_array_index = be.max_array_index))
+
+    # The missing set is not contiguous, so tasks index a MANIFEST of the items
+    # still to do rather than doing arithmetic on the array id.
+    manifest = joinpath(h.outdir, "manifest_redo_$(length(st.missing)).txt")
+    open(manifest, "w") do io
+        for i in st.missing; println(io, i); end
+    end
+    @info "resubmitting" n = length(st.missing) manifest
+    SweepHandle(String[], manifest, h.outdir, h.n_items, be)
+end
+
+"""
+    collect_sweep(h::SweepHandle) -> LFOResult
+
+Combine every finished work item into one result.
+
+Errors if any item is missing rather than quietly returning a partial sweep: an
+ELPD total over 26 of 30 windows is not comparable with one over 30, and the
+whole point of `compare` refusing mismatched cutoffs is undone if the totals
+silently cover different sets.
+"""
+function collect_sweep(h::SweepHandle)
+    st = sweep_status(h)
+    isempty(st.missing) || throw(ErrorException("""
+        $(length(st.missing)) of $(h.n_items) items have no result: $(st.missing)
+        A total over a subset is not comparable with one over the full sweep.
+        Use `resubmit(h)` and wait, or build a handle over the finished subset if
+        a partial sweep is genuinely what you want."""))
+
+    parts = [open(deserialize, _item_file(h.outdir, i)) for i in 0:(h.n_items - 1)]
+    windows = reduce(vcat, (p.windows for p in parts))
+    sort!(windows, by = w -> w.cutoff)
+    first_p = first(parts)
+    LFOResult(windows, first_p.granularities, first_p.L, first_p.M, first_p.meta)
+end

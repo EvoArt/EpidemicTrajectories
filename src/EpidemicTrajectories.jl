@@ -44,6 +44,7 @@ include("lfo_score.jl")
 include("lfo_run.jl")
 include("lfo_psis.jl")
 include("lfo_backend.jl")
+include("lfo_adapt.jl")
 
 # Model specification
 export TransitionSpec, @transitions, @survival
@@ -77,5 +78,6 @@ export forward_simulate, score_window, survival_constrained
 export LFOSpec, lfo_cv
 export psis_smooth, psis_ess
 export LocalBackend, SlurmArray, SweepHandle, sweep_status, work_item, write_sbatch
+export AdaptTrace, record!, check_adaptation, flat_likelihood_range
 
 end # module EpidemicTrajectories

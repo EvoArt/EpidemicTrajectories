@@ -23,6 +23,8 @@ Fields:
 - `observation_process` — `(model, data, X, i, t) -> per-state weight vector`
 - `derived_summaries` — the user's reversible aggregate updates
 - `rest_contribution` — the coupling term (see [`make_rest_contribution`](@ref))
+- `neighbor_logprob`, `coupled_mask` — the pieces the default coupling term is
+  built from, kept so the MH conditional target can reuse them verbatim
 - `affected_individuals` — who each individual's state affects, indexed `[t, i]`,
   so it may vary over time
 - `extras` — anything else the user's own functions need (covariates, test
@@ -47,7 +49,7 @@ profiling: this alone accounted for the bulk of a ~6x gap between the badger
 model's iFFBS sweep and its reference-implementation counterpart, matching the
 same pattern found earlier for `trans_mat` — see the devlog/repro log for both.
 """
-struct EpidemicData{SS,OP,OW,RC,EX<:NamedTuple,AG<:NamedTuple,RF<:Tuple,CP,DS<:Tuple}
+struct EpidemicData{SS,OP,OW,RC,NL,EX<:NamedTuple,AG<:NamedTuple,RF<:Tuple,CP,DS<:Tuple}
     n_individuals::Int
     n_timepoints::Int
     n_states::Int
@@ -74,6 +76,21 @@ struct EpidemicData{SS,OP,OW,RC,EX<:NamedTuple,AG<:NamedTuple,RF<:Tuple,CP,DS<:T
     observation_weight::OW
     derived_summaries::DS
     rest_contribution::RC
+    # How to score a neighbour's realised move, and which of those moves the focal
+    # can influence. `epidemic_conditional_loglik` defaults to these, so the MH
+    # target and the forward filter share one definition of the coupling rather
+    # than two constructors that happen to agree.
+    #
+    # `neighbor_logprob` is derived from the TARGET `trans_mat` (or its survival-
+    # free `coupling` view), NOT from a `coupling_trans_mat` override — see
+    # `epidemic_data` for why that asymmetry is deliberate.
+    #
+    # `NL` is parameterised for the usual reason (a bare `Function` field would
+    # dispatch at runtime on every neighbour visit). `coupled_mask` is a small
+    # `Union` with `nothing`, matching `affected_individuals` — cheap, and the
+    # branch on it is hoisted out of the inner loop.
+    neighbor_logprob::NL
+    coupled_mask::Union{Nothing,Matrix{Bool}}
     affected_individuals::Union{Nothing,Matrix{Vector{Int}}}
     # `_focal` names the individual currently being resampled (or -1), so a rate
     # evaluated inside that individual's own forward filter can transiently re-add
@@ -415,7 +432,31 @@ function epidemic_data(; n_individuals, n_timepoints, trans_mat,
     # is also the only one that may safely use a spec with cached rates.
     coupling_spec = coupling_trans_mat !== nothing ? coupling_trans_mat :
         (trans_mat.coupling !== nothing ? trans_mat.coupling : trans_mat)
-    neighbor_logprob = make_neighbor_logprob_from_transitions(coupling_spec)
+    filter_neighbor_logprob = make_neighbor_logprob_from_transitions(coupling_spec)
+
+    # The neighbour scorer stored on `data`, and hence the one
+    # `epidemic_conditional_loglik` defaults to, is derived from `trans_mat` — the
+    # TARGET — and deliberately ignores any `coupling_trans_mat` override.
+    #
+    # That asymmetry is the whole point. `coupling_trans_mat` is sold as a safe
+    # optimisation on the grounds that its cached rates equal the true ones; when
+    # they do, this scorer and `filter_neighbor_logprob` agree and every MH
+    # acceptance ratio is 1. When they have DRIFTED, the two disagree and
+    # `check_iffbs_exact` says so. Storing the coupling override here instead would
+    # make the check compare the approximation against itself, which is exactly the
+    # silent failure it exists to catch.
+    #
+    # It still uses the survival-free `coupling` VIEW when `@survival` built one.
+    # That is not an approximation: a neighbour's own survival factor does not
+    # depend on the focal, so it contributes the same constant to every candidate
+    # and cancels in both the filter's normalisation and the MH ratio's difference.
+    # Scoring through the survival-scaled probability instead risks it underflowing
+    # to the 1e-12 floor, at which point the constant stops being constant — the
+    # coupling-annihilation bug the `coupling` view was introduced to fix.
+    target_neighbor_logprob = trans_mat.coupling !== nothing ?
+        make_neighbor_logprob_from_transitions(trans_mat.coupling) :
+        make_neighbor_logprob_from_transitions(trans_mat)
+    neighbor_logprob = target_neighbor_logprob
     # `make_rest_contribution`'s brute-force counterfactual loop is the DEFAULT,
     # not the only option — a motivated user who knows their coupling structure
     # (e.g. it factors through a per-group running total, as the reference
@@ -424,7 +465,7 @@ function epidemic_data(; n_individuals, n_timepoints, trans_mat,
     # function's docstring for the contract and a worked sketch.
     rest_contribution = rest_contribution !== nothing ? rest_contribution :
         make_rest_contribution(affected_ids=affected_ids,
-                                neighbor_logprob=neighbor_logprob,
+                                neighbor_logprob=filter_neighbor_logprob,
                                 coupled_mask=coupled_mask)
 
     # Resolve the observation model. A user may give the per-state weight VECTOR
@@ -472,6 +513,8 @@ function epidemic_data(; n_individuals, n_timepoints, trans_mat,
         observation_weight,
         Tuple(derived_summaries),
         rest_contribution,
+        neighbor_logprob,
+        coupled_mask,
         affected_individuals,
         Ref(-1),
         focal_self_contribution,

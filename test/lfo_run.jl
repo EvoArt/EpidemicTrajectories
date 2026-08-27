@@ -155,3 +155,65 @@ end
     @test c.diff > 0
     @test c.n_windows == length(rg.windows)
 end
+
+@testset "lfo_cv: launcher/worker split" begin
+    # A scheduler task starts cold and cannot receive a closure, so the sweep
+    # works by re-running the user's script with LFO_WORK_ITEM set. Here we drive
+    # both roles directly rather than through sbatch, which CI has no access to.
+    s = _sid_run()
+    truth = (; α = 0.02, β = 0.03, m = 4.0, μ = 0.02)
+    X_obs = epidemic_simulator(s.data)(StableRNG(11), truth)
+    plan = truncation(clamp = (:last_seen,), keep = (:sex,))
+    spec = LFOSpec(fit = _fake_fit(truth, X_obs, 4), plan = plan,
+                   cell_logdensity = (m, d, X, i, t) -> -0.3)
+
+    dir = mktempdir()
+    ts = lfo_cutoffs(s.data; L = 12, M = 2)
+    be = SlurmArray(partition = "p", script = "dummy.jl")
+
+    old_out = get(ENV, "LFO_OUTDIR", nothing)
+    ENV["LFO_OUTDIR"] = dir
+    try
+        # WORKER: one item -> exactly one window, written where sweep_status looks
+        for item in (0, 2)
+            ENV["LFO_WORK_ITEM"] = string(item)
+            r = lfo_cv(spec, s.data; L = 12, M = 2, backend = be, verbose = false)
+            @test length(r.windows) == 1
+            @test r.windows[1].cutoff == ts[item + 1]     # the RIGHT cutoff
+            @test isfile(EpidemicTrajectories._item_file(dir, item))
+        end
+
+        # and sweep_status sees exactly those two as done
+        h = SweepHandle(String[], joinpath(dir, "manifest.txt"), dir, length(ts), be)
+        st = sweep_status(h)
+        @test st.n_done == 2
+        @test !(0 in st.missing) && !(2 in st.missing)
+        @test 1 in st.missing
+
+        # an out-of-range item is an error, not a silent no-op
+        ENV["LFO_WORK_ITEM"] = string(length(ts) + 5)
+        @test_throws ArgumentError lfo_cv(spec, s.data; L = 12, M = 2,
+                                          backend = be, verbose = false)
+    finally
+        delete!(ENV, "LFO_WORK_ITEM")
+        old_out === nothing ? delete!(ENV, "LFO_OUTDIR") : (ENV["LFO_OUTDIR"] = old_out)
+    end
+end
+
+@testset "lfo_cv: LocalBackend ignores a stray work item" begin
+    # LFO_WORK_ITEM left in the environment must not silently truncate a local
+    # sweep to one window.
+    s = _sid_run()
+    truth = (; α = 0.02, β = 0.03, m = 4.0, μ = 0.02)
+    X_obs = epidemic_simulator(s.data)(StableRNG(12), truth)
+    spec = LFOSpec(fit = _fake_fit(truth, X_obs, 4),
+                   plan = truncation(clamp = (:last_seen,), keep = (:sex,)),
+                   cell_logdensity = (m, d, X, i, t) -> -0.3)
+    ENV["LFO_WORK_ITEM"] = "0"
+    try
+        r = lfo_cv(spec, s.data; L = 12, M = 2, verbose = false)
+        @test length(r.windows) == length(lfo_cutoffs(s.data; L = 12, M = 2))
+    finally
+        delete!(ENV, "LFO_WORK_ITEM")
+    end
+end

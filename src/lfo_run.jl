@@ -78,6 +78,7 @@ function lfo_cv(spec::LFOSpec, data::EpidemicData;
                 stride::Int = 1,
                 cache = nothing,
                 cutoffs = nothing,
+                backend = LocalBackend(),
                 verbose::Bool = true)
 
     (spec.constrain === nothing) == (spec.survival_weight === nothing) ||
@@ -94,6 +95,20 @@ function lfo_cv(spec::LFOSpec, data::EpidemicData;
 
     ts = cutoffs === nothing ? lfo_cutoffs(data; L, M, stride) : collect(cutoffs)
     cache === nothing || mkpath(cache)
+
+    # RE-ENTRANCY. Under a scheduler backend this same script runs twice: once as
+    # the LAUNCHER (no work item in the environment) and once per task as a
+    # WORKER (one item set). The spec is rebuilt simply because everything above
+    # this call re-executes -- which is why a closure never has to be serialised.
+    if !(backend isa LocalBackend)
+        item = work_item()
+        if item === nothing
+            return _launch(backend, spec, data, ts, M, gnames, cache, verbose)
+        end
+        1 <= item + 1 <= length(ts) ||
+            throw(ArgumentError("work item $item outside 0:$(length(ts) - 1)"))
+        ts = [ts[item + 1]]              # this task does exactly one cutoff
+    end
 
     windows = WindowResult[]
     for t in ts
@@ -134,9 +149,75 @@ function lfo_cv(spec::LFOSpec, data::EpidemicData;
         verbose && _report_window(windows[end], gnames)
     end
 
-    LFOResult(windows, gnames, L, M,
-              Dict{Symbol,Any}(:n_sim => spec.n_sim, :stride => stride,
-                               :cache => cache))
+    res = LFOResult(windows, gnames, L, M,
+                    Dict{Symbol,Any}(:n_sim => spec.n_sim, :stride => stride,
+                                     :cache => cache))
+
+    # A WORKER writes its one window where `sweep_status` looks for it. Existence
+    # of this file is what marks the item done -- never a progress log, which is
+    # only written by tasks that reach the end and so cannot record a task that
+    # died at startup.
+    if !(backend isa LocalBackend)
+        item = work_item()
+        if item !== nothing
+            outdir = get(ENV, "LFO_OUTDIR", ".")
+            mkpath(outdir)
+            open(f -> serialize(f, res), _item_file(outdir, item), "w")
+        end
+    end
+    res
+end
+
+"""
+    _launch(backend, spec, data, cutoffs, ...) -> SweepHandle
+
+Submit the sweep and return immediately. Called when a scheduler backend is given
+and no work item is set, i.e. this process is the launcher.
+"""
+function _launch(be::SlurmArray, spec::LFOSpec, data::EpidemicData,
+                 ts::Vector{Int}, M::Int, gnames, cache, verbose::Bool)
+    script = be.script === nothing ? _calling_script() : be.script
+    script === nothing && throw(ArgumentError("""
+        could not determine the script to re-run; pass `script=` to SlurmArray.
+        A scheduler task starts cold and cannot receive a closure, so the sweep
+        works by re-running YOUR script with LFO_WORK_ITEM set."""))
+
+    outdir = abspath(get(ENV, "LFO_OUTDIR", "lfo_sweep"))
+    mkpath(joinpath(outdir, "logs"))
+    manifest = joinpath(outdir, "manifest.txt")
+    open(manifest, "w") do io
+        for t in ts; println(io, t); end
+    end
+
+    # MaxArraySize caps the array INDEX, not the count, so slices always start at
+    # 0 and an offset shifts them onto the right part of the manifest.
+    n = length(ts)
+    job_ids = String[]
+    offset = 0
+    while offset < n
+        ntasks = min(n - offset, be.max_array_index + 1)
+        sh = joinpath(outdir, "submit_$(offset).sh")
+        open(io -> write_sbatch(io, be, script, outdir, offset, ntasks), sh, "w")
+        id = try
+            strip(read(`sbatch --parsable $sh`, String))
+        catch err
+            throw(ErrorException("sbatch failed for offset $offset: $err"))
+        end
+        push!(job_ids, String(id))
+        verbose && @info "submitted" offset ntasks job = id
+        offset += ntasks
+    end
+    SweepHandle(job_ids, manifest, outdir, n, be)
+end
+
+"The path of the script that called into here, or `nothing` from a REPL."
+function _calling_script()
+    for f in stacktrace()
+        p = String(f.file)
+        (isempty(p) || startswith(p, "REPL") || occursin("EpidemicTrajectories", p)) && continue
+        endswith(p, ".jl") && isfile(p) && return abspath(p)
+    end
+    isinteractive() ? nothing : (isempty(PROGRAM_FILE) ? nothing : abspath(PROGRAM_FILE))
 end
 
 # StableRNGs is not a dependency; fall back to the stdlib if it is absent. A

@@ -58,9 +58,11 @@ include("diagnostics.jl")
 include("truncate.jl")
 include("lfo.jl")
 include("lfo_score.jl")
+# `lfo_backend.jl` before `lfo_run.jl`: the driver dispatches on the backend
+# types and writes worker output through `_item_file`.
+include("lfo_backend.jl")
 include("lfo_run.jl")
 include("lfo_psis.jl")
-include("lfo_backend.jl")
 include("lfo_adapt.jl")
 # Model specification
 export TransitionSpec, @transitions, @survival

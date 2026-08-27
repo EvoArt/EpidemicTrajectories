@@ -23,3 +23,20 @@ smoke_err.txt
 /outputs/
 /badger_out/
 /badger_ref/
+
+# Generated example artefacts (logs, flags, profile/scratch dumps)
+examples/*.log
+examples/*.flag
+examples/*.txt
+examples/outputs/
+# Large local reference/investigation data (not part of the package)
+/_upstream/
+/latest_badger_ref/
+/badger_variants/
+/examples/athena_badgers/
+
+# Working notes / design docs kept locally, not repository content
+EpidemicTrajectoriesR_DESIGN.md
+
+# Archived trajectories from the showcase scripts (large, regenerated)
+examples/showcase/*.jld2

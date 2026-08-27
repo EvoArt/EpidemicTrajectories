@@ -3,6 +3,7 @@ using Test
 using Random
 using StableRNGs: StableRNG
 using Statistics: mean, std
+using Serialization: Serialization
 
 # A test file NOT listed here silently does not run. Adding one is part of
 # adding the feature, not an afterthought.

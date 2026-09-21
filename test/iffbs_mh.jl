@@ -141,8 +141,8 @@ end
 end
 
 @testset "EpidemicData: every field of a built instance is concrete" begin
-    # CLAUDE.md's third-instance trap: a field annotated with a parametric type
-    # must bind EVERY parameter or it is silently abstract. `neighbor_logprob` and
+    # A field annotated with a parametric type must bind every parameter, or it
+    # is silently abstract. This has caught us out three times now. `neighbor_logprob` and
     # `coupled_mask` are new fields, so re-run the check on the whole struct.
     s = _mh_setup(; coupled_transitions=[(:S, :I)])
     D = typeof(s.data)

@@ -1,9 +1,8 @@
 # The leave-future-out driver: walk the cutoffs, fit, score, collect.
 #
-# Deliberately small. Everything hard lives in the pieces it calls -- truncation
-# (truncate.jl), aggregation (lfo.jl), scoring (lfo_score.jl) -- and this file is
-# just the loop plus the two things a loop must get right: caching fits, and
-# never scoring a window whose fit saw the future.
+# Deliberately small. Everything hard lives in the pieces it calls, and this is
+# the loop plus the two things a loop must get right: caching fits, and never
+# scoring a window whose fit saw the future.
 
 """
     LFOSpec(; fit, cell_logdensity, plan, kwargs...)
@@ -11,21 +10,21 @@
 Everything `lfo_cv` needs from a model.
 
 # Required
-- `fit(train_data, cutoff) -> (draws, X_draws)` — fit to the truncated data.
+- `fit(train_data, cutoff) -> (draws, X_draws)`: fit to the truncated data.
   `draws[s]` is whatever your `cell_logdensity` wants as its `model` argument;
-  `X_draws[s]` is draw `s`'s latent trajectory over the WHOLE series.
-- `cell_logdensity(model, data, X, i, t) -> Float64` — log density of individual
+  `X_draws[s]` is draw `s`'s latent trajectory over the whole series.
+- `cell_logdensity(model, data, X, i, t) -> Float64`: log density of individual
   `i`'s observation at `t` under the (simulated) states in `X`. Return `-Inf` for
   an inadmissible trajectory; it is charged to that individual's cell alone.
-- `plan::TruncationPlan` — from [`truncation`](@ref).
+- `plan::TruncationPlan`, from [`truncation`](@ref).
 
 # Optional
-- `is_informative(data, i, t) -> Bool` — whether that cell's density depends on
+- `is_informative(data, i, t) -> Bool` — OPTIONAL. Whether that cell's density depends on
   the latent state. Strongly recommended: see [`n_informative`](@ref).
-- `constrain` / `survival_weight` — from [`survival_constrained`](@ref). Pass
+- `constrain` / `survival_weight`: from [`survival_constrained`](@ref). Pass
   both or neither; passing one alone is a bias, so it is rejected.
-- `n_sim` — forward trajectories per draw (default 1).
-- `seed` — base RNG seed; window `t`, draw `s` uses `seed + 1000s + t` so that
+- `n_sim`: forward trajectories per draw (default 1).
+- `seed`, base RNG seed; window `t`, draw `s` uses `seed + 1000s + t` so that
   every granularity sees IDENTICAL trajectories and the arms differ only in
   where the log is taken.
 """
@@ -49,13 +48,13 @@ Run leave-future-out cross-validation.
 For each cutoff `t` in `L:stride:(T-M)`: truncate the data to `t`, fit, then
 score `t+1 : t+M` under every requested granularity **from the same fit and the
 same forward trajectories**. Scoring all granularities together is not an
-optimisation — it is what makes them comparable, since separate runs would see
+optimisation: it is what makes them comparable, since separate runs would see
 different trajectories and the difference would no longer be attributable to the
 granularity.
 
 # Caching
 `cache` is a directory for fitted chains. The key is what changes the POSTERIOR
-— the cutoff and the spec's own fit function — and NOT the granularity or the
+— the cutoff and the spec's own fit function — and not the granularity or the
 scorer. Rescoring then costs seconds instead of a refit. Always cache anything
 expensive: adding one scoring arm to an uncached 120-fit sweep once meant
 repeating every fit to redo four minutes of arithmetic.
@@ -85,7 +84,7 @@ function lfo_cv(spec::LFOSpec, data::EpidemicData;
         throw(ArgumentError("""
             pass `constrain` and `survival_weight` together or not at all.
             A constraint without its weight deletes a branch of the proposal with
-            nothing to correct it -- a bias that does NOT shrink with n_sim.
+            nothing to correct it -- a bias that does not shrink with n_sim.
             Build both from `survival_constrained(...)`."""))
 
     grans = granularity isa Granularity ? (granularity,) : Tuple(granularity)
@@ -97,8 +96,8 @@ function lfo_cv(spec::LFOSpec, data::EpidemicData;
     cache === nothing || mkpath(cache)
 
     # RE-ENTRANCY. Under a scheduler backend this same script runs twice: once as
-    # the LAUNCHER (no work item in the environment) and once per task as a
-    # WORKER (one item set). The spec is rebuilt simply because everything above
+    # the launcher (no work item in the environment) and once per task as a
+    # worker (one item set). The spec is rebuilt simply because everything above
     # this call re-executes -- which is why a closure never has to be serialised.
     if !(backend isa LocalBackend)
         item = work_item()
@@ -121,10 +120,10 @@ function lfo_cv(spec::LFOSpec, data::EpidemicData;
         t_score = time()
         S = length(X_draws)
         cell_lp = Dict(g => Vector{Dict{Any,Float64}}(undef, S) for g in gnames)
-        n_inf = 0
+        n_inf = spec.is_informative === nothing ? nothing : 0
         for s in 1:S
             for (g, gname) in zip(grans, gnames)
-                # SAME seed for every granularity => identical trajectories.
+                # same seed for every granularity => identical trajectories.
                 rng = StableRNG_or_default(spec.seed + 1000 * s + t)
                 cells, ni = score_window(draws[s], data, X_draws[s], t, M, g;
                                          cell_logdensity = spec.cell_logdensity,
@@ -153,7 +152,7 @@ function lfo_cv(spec::LFOSpec, data::EpidemicData;
                     Dict{Symbol,Any}(:n_sim => spec.n_sim, :stride => stride,
                                      :cache => cache))
 
-    # A WORKER writes its one window where `sweep_status` looks for it. Existence
+    # A worker writes its one window where `sweep_status` looks for it. Existence
     # of this file is what marks the item done -- never a progress log, which is
     # only written by tasks that reach the end and so cannot record a task that
     # died at startup.
@@ -180,7 +179,7 @@ function _launch(be::SlurmArray, spec::LFOSpec, data::EpidemicData,
     script === nothing && throw(ArgumentError("""
         could not determine the script to re-run; pass `script=` to SlurmArray.
         A scheduler task starts cold and cannot receive a closure, so the sweep
-        works by re-running YOUR script with LFO_WORK_ITEM set."""))
+        works by re-running your script with LFO_WORK_ITEM set."""))
 
     outdir = abspath(get(ENV, "LFO_OUTDIR", "lfo_sweep"))
     mkpath(joinpath(outdir, "logs"))
@@ -189,7 +188,7 @@ function _launch(be::SlurmArray, spec::LFOSpec, data::EpidemicData,
         for t in ts; println(io, t); end
     end
 
-    # MaxArraySize caps the array INDEX, not the count, so slices always start at
+    # MaxArraySize caps the array index, not the count, so slices always start at
     # 0 and an offset shifts them onto the right part of the manifest.
     n = length(ts)
     job_ids = String[]
@@ -245,6 +244,7 @@ end
 
 function _report_window(w::WindowResult, gnames)
     parts = join((@sprintf("%s=%.2f", String(g), w.elpd[g]) for g in gnames), "  ")
-    @info @sprintf("cutoff %d: %s  (fit %.1fs, score %.1fs, informative %d)",
-                   w.cutoff, parts, w.fit_seconds, w.score_seconds, w.n_informative)
+    inf = w.n_informative === nothing ? "n/a" : string(w.n_informative)
+    @info @sprintf("cutoff %d: %s  (fit %.1fs, score %.1fs, informative %s)",
+                   w.cutoff, parts, w.fit_seconds, w.score_seconds, inf)
 end

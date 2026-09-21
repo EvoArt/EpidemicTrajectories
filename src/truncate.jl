@@ -1,31 +1,16 @@
 # Truncating an `EpidemicData` to a training window, for leave-future-out CV.
 #
-# WHY THIS IS NOT A ONE-LINER. Leave-future-out cross-validation fits to data up
-# to a cutoff `t` and scores the next `M` steps without letting the fit see them.
-# Shortening `sampling_period` looks sufficient and is NOT: any *extra* the user
-# attached to the data may carry information from beyond the cutoff, and the
-# package cannot know which ones do — extras are arbitrary user arrays, by
-# design (see the central design rule in CLAUDE.md).
+# Shortening `sampling_period` is not sufficient. Any extra the user attached
+# may carry information from beyond the cutoff, and the package cannot know
+# which ones do. Two real leaks, both measured on the badger model and both
+# invisible until looked for: a `last_capture_time` death-ban still banning
+# death past the cutoff, and `captures_after_monit` feeding post-cutoff
+# survival evidence into the parameters the comparison is about.
 #
-# Two real leaks, both measured on the badger model, both invisible until looked
-# for:
-#
-#   1. `last_capture_time` feeds a death-ban in the user's observation weight
-#      ("this individual cannot be dead at or before its last capture"). Left
-#      untruncated, an individual last seen at t=150 has death banned up to 150
-#      even in a fit truncated at 128 — 460-786 individual-steps per window of
-#      information the fit must not have.
-#
-#   2. `captures_after_monit` adds survival likelihood for steps beyond the
-#      monitoring window, feeding post-cutoff evidence straight into the survival
-#      parameters that the model comparison is about — 22 of 118 entries at one
-#      cutoff, up to 31 steps past it.
-#
-# Neither is discoverable from the type: both are plain arrays in `extras`. So
-# the user DECLARES what to do with each, and an extra that looks time-indexed
-# but was never declared is an ERROR rather than a silent pass-through. A silent
-# leak is the worst outcome here: it inflates the score of whichever model
-# exploits it, and nothing about the result looks wrong.
+# So the user declares what to do with each extra, and one that looks
+# time-indexed but was never declared is an error. A silent leak inflates the
+# score of whichever model exploits it, and nothing about the result looks
+# wrong.
 
 """
     TruncationRule
@@ -63,7 +48,7 @@ Filter() = Filter(last)
 Copy the array, unchanged in value.
 
 For arrays a sampler MUTATES IN PLACE. Sharing them between the truncated and
-untruncated data lets one window's mutation leak into the other's view — e.g. a
+untruncated data lets one window's mutation leak into the other's view: e.g. a
 changepoint kernel that swaps test labellings in place.
 """
 struct CopyArray <: TruncationRule end
@@ -100,17 +85,17 @@ Declare how each entry of `EpidemicData.extras` behaves under truncation, for
 leave-future-out cross-validation.
 
 Every extra must be accounted for. With `strict=true` (the default) an undeclared
-extra whose value is time-shaped — a `Vector`/`Matrix` long enough to be indexed
+extra whose value is time-shaped, a `Vector`/`Matrix` long enough to be indexed
 by time, or a collection of `(id, time)` tuples — is an **error**, because the
 common failure mode is a silent leak that quietly inflates a model's score.
 Declare it `keep` if it genuinely carries no future information; that is a
 one-word statement that you checked.
 
 # Rules
-- `clamp`   — `min.(v, cutoff)`; for "last time known present" vectors.
-- `filter`  — drop entries after the cutoff; for event lists of `(id, time)`.
-- `copy`    — same values, fresh array; for anything a sampler mutates in place.
-- `keep`    — carried through untouched; an explicit "no future information here".
+- `clamp`  , `min.(v, cutoff)`; for "last time known present" vectors.
+- `filter` : drop entries after the cutoff; for event lists of `(id, time)`.
+- `copy`   , same values, fresh array; for anything a sampler mutates in place.
+- `keep`   , carried through untouched; an explicit "no future information here".
 - `custom`  — `name => (v, cutoff) -> new_v` for anything else.
 
 # Example
@@ -145,7 +130,7 @@ end
 """
     _looks_time_indexed(v, n_timepoints) -> Bool
 
-Heuristic used ONLY to decide whether an undeclared extra should raise under
+Heuristic used only to decide whether an undeclared extra should raise under
 `strict`. Deliberately over-eager: a false positive costs one word (`keep`), a
 false negative costs a silent leak.
 """
@@ -171,7 +156,7 @@ Undeclared time-shaped extras raise unless the plan was built with
 
 The cutoff is the strict reading of "train on `1:t`". Clamping to `t + M`
 instead would remove some downstream `-Inf`s, but only by letting the fit see
-which individuals are observed during the scoring window — future information,
+which individuals are observed during the scoring window: future information,
 even if it is design rather than outcome.
 """
 function truncate_data(data::EpidemicData, plan::TruncationPlan, cutoff::Int)
@@ -192,9 +177,9 @@ function truncate_data(data::EpidemicData, plan::TruncationPlan, cutoff::Int)
             Any of them could carry information from beyond the cutoff into the
             training fit, which silently inflates the score of whichever model
             exploits it. Declare each one:
-                clamp  — min.(v, cutoff), for "last time known present"
-                filter — drop entries after the cutoff, for (id, time) events
-                copy   — same values, fresh array, for in-place-mutated arrays
+                clamp , min.(v, cutoff), for "last time known present"
+                filter: drop entries after the cutoff, for (id, time) events
+                copy  : same values, fresh array, for in-place-mutated arrays
                 keep   — carried through untouched (an explicit "I checked")
             or build the plan with `strict=false` to silence this check.""")
     end
@@ -231,7 +216,7 @@ end
 The cutoffs a leave-future-out sweep visits: `L:stride:(T - M)`.
 
 `L` is the minimum training window. Choose it from when the data first identify
-the model's parameters, not for roundness — on the badger model the natural
+the model's parameters, not for roundness, on the badger model the natural
 choice was set by when the diagnostic tests came into use, and a smaller `L` left
 most observation parameters at their priors while the fit scored held-out data.
 """

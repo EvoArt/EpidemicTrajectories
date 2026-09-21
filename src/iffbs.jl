@@ -1,31 +1,18 @@
-# Individual forward-filtering, backward-sampling (iFFBS).
+# Individual forward-filtering, backward-sampling.
 #
 # Resamples one individual's whole state trajectory from its exact conditional
-# given the parameters, the observations, and every other individual's trajectory.
-# Sweeping over all individuals is a valid Gibbs update of the entire latent `X`.
+# given the parameters, the observations, and every other individual's
+# trajectory. Sweeping over all individuals is a valid Gibbs update of `X`.
 #
-# The aggregates are kept consistent with `X` throughout by reversing the focal
-# individual's contribution before refiltering and re-applying it afterwards — see
-# `aggregates.jl` for why that reversibility is the design's foundation. It is also
-# what makes the statistics the focal individual sees leave-one-out (excluding
-# itself) without any special-casing.
+# The aggregates stay consistent with `X` because the focal individual's
+# contribution is reversed before refiltering and re-applied afterwards, which
+# is also what makes the statistics it sees leave-one-out without any
+# special-casing.
+#
+# `iffbs!` is an exact Gibbs step only when the chain the filter runs is the
+# chain the likelihood scores. `IFFBSProposal` names that chain explicitly so
+# it can be a different one, which `iffbs_mh!` then corrects for.
 
-# --- The proposal: which chain the filter actually runs ----------------------
-#
-# `iffbs!` is an exact Gibbs step only when the chain the forward filter runs is
-# the chain the likelihood scores. `IFFBSProposal` names that chain explicitly so
-# it can be a DIFFERENT one — which is what `iffbs_mh!` (iffbs_mh.jl) corrects for
-# with a Metropolis-Hastings accept/reject step.
-#
-# The default is built from `data` and reproduces the previous behaviour exactly:
-# every field is the corresponding field of `data`. Nothing about `iffbs!` changes.
-#
-# All four fields are parameterised. That is the CLAUDE.md concrete-types rule, and
-# specifically the third-instance trap it records: a field annotated with a
-# parametric type must bind EVERY one of that type's parameters or the field is
-# abstract. Leaving `TM` free (rather than writing `TransitionSpec{RF}`) sidesteps
-# that entirely, and has the bonus that a proposal's transition source need not be
-# a `TransitionSpec` at all.
 struct IFFBSProposal{TM,SS,OP,RC}
     trans_mat::TM              # the chain the filter pushes probability through
     starting_state::SS         # its initial distribution
@@ -40,15 +27,15 @@ The chain the iFFBS forward filter runs. Every keyword defaults to the matching
 field of `data`, so `iffbs_proposal(data)` is the exact conditional's own chain and
 `iffbs!` with it is the ordinary exact Gibbs sweep.
 
-Override a field to make the filter a PROPOSAL for a different target, and correct
+Override a field to make the filter a proposal for a different target, and correct
 the difference with [`iffbs_mh!`](@ref):
 
-  * `rest_contribution = no_rest_contribution` — drop the between-individual term
+  * `rest_contribution = no_rest_contribution`, drop the between-individual term
     from the filter. This is the paper's MHiFFBS (Touloupou, Finkenstadt & Spencer
-    2020, section 3.3.2). Note the ratio still needs the TARGET's neighbour terms
+    2020, section 3.3.2). Note the ratio still needs the target's neighbour terms
     for the two realised paths, so this saves a factor of `n_states / 2` on the
     coupling work, not the whole of it.
-  * `trans_mat = <a Markov approximation>` — for a semi-Markov target, whose
+  * `trans_mat = <a Markov approximation>`: for a semi-Markov target, whose
     sojourn-dependent hazard no first-order filter can represent. This is the
     paper's SM-iFFBS (section 4.3).
 
@@ -65,7 +52,7 @@ iffbs_proposal(data::EpidemicData;
     uncorrected_proposal(data)
 
 The paper's "uncorrected-iFFBS" proposal: the filter drops the coupling term
-entirely (standard FFBS on a single chain). Valid ONLY inside [`iffbs_mh!`](@ref) —
+entirely (standard FFBS on a single chain). Valid only inside [`iffbs_mh!`](@ref) —
 used as a Gibbs step it targets the wrong conditional, which is the failure mode
 the paper's Supplementary section A documents.
 """
@@ -75,7 +62,7 @@ uncorrected_proposal(data::EpidemicData) =
 """
     markov_proposal(data, trans_mat)
 
-A proposal that swaps only the transition spec — the shape needed for a
+A proposal that swaps only the transition spec: the shape needed for a
 semi-Markov target, where `trans_mat` is a first-order approximation of it
 (e.g. the geometric/kappa = 1 chain of the paper's section 4.3).
 """
@@ -92,7 +79,7 @@ initialise_forward_filter(model, data::EpidemicData, X, i, t) = data.starting_st
 # sweep, with each one using the leading `1:n_t` slice.
 #
 # Before this, every individual allocated a fresh `N x N x n_t` `trans_cache`
-# (~20 KB at N=4, n_t=78) and an `n_t x N` `probs`, then zeroed both — ~48 MB of
+# (~20 KB at N=4, n_t=78) and an `n_t x N` `probs`, then zeroed both: ~48 MB of
 # pointless zeroing per badger sweep, and a fresh cold region of memory each time.
 #
 # Held in a module-level `Ref` keyed by size rather than threaded through the call
@@ -101,14 +88,13 @@ initialise_forward_filter(model, data::EpidemicData, X, i, t) = data.starting_st
 # CANNOT be run in parallel), and this keeps the public `forward_filter` /
 # `backward_sample!` signatures unchanged for anyone calling them directly.
 #
-# CONCRETELY TYPED, and that is not optional. A first version used
+# concretely typed, and that is not optional. A first version used
 # `Ref{Any}(nothing)` holding a NamedTuple: every `_filter_scratch` call then
 # returned `Any`, so `s.probs`/`s.cur`/`s.w` were dynamic lookups and the buffers
 # reached the inner loops untyped. Measured: the sweep got SLOWER (0.435 ->
-# 0.546 s) even though allocation fell 199 -> 139 MB — type instability across
-# the whole inner loop cost more than the allocations it removed. Exactly the
-# trap CLAUDE.md's performance notes describe, hit while trying to fix a
-# different one.
+# 0.546 s) even though allocation fell 199 -> 139 MB: type instability across
+# the whole inner loop cost more than the allocations it removed: the usual
+# trap, hit while trying to fix a different one.
 struct FilterScratch
     probs::Matrix{Float64}
     trans::Array{Float64,3}
@@ -116,9 +102,9 @@ struct FilterScratch
     cur::Vector{Float64}
     w::Vector{Float64}
     # Two whole-window Int paths, for `iffbs_mh!` only. The MH step must hold the
-    # CURRENT path while the candidate is drawn (it scores both against the same
+    # current path while the candidate is drawn (it scores both against the same
     # filter), so unlike `iffbs!` it cannot sample straight into `X`. Sized with
-    # everything else so the reject branch — which copies the current path back —
+    # everything else so the reject branch, which copies the current path back —
     # allocates nothing.
     path_cur::Vector{Int}
     path_can::Vector{Int}
@@ -153,7 +139,7 @@ cached transition matrices (reused by the backward pass).
 
 The backward pass needs every timepoint's transition matrix still alive when it
 runs, so they can't share one buffer the way a single-matrix-at-a-time loop would
-— but they need not be `length(xᵢ)` SEPARATE allocations either. `trans_cache` is
+— but they need not be `length(xᵢ)` separate allocations either. `trans_cache` is
 one contiguous `N × N × (length(xᵢ)-1)` array, filled a slice at a time via
 [`transition_matrix_at!`](@ref); `rowsum` is pure scratch (nothing outside
 `transition_matrix_at!` reads it) and is genuinely reused across every timepoint.
@@ -181,7 +167,7 @@ end
 In-place [`forward_filter`](@ref): writes the filtered distributions into `probs`
 and the transition matrices into `trans_cache`, allocating nothing per timepoint.
 
-Every intermediate the old version built fresh at each `(i, t)` — the predicted
+Every intermediate the old version built fresh at each `(i, t)`, the predicted
 distribution (`trans' * probs[j-1, :]`, which also materialised a transpose), the
 unnormalised product, and the normalised result — is now a write into a reused
 `N`-length buffer, and the matrix-vector product is an explicit loop (`N` is 4 in
@@ -195,8 +181,8 @@ function forward_filter!(probs, trans_cache, scratch, xᵢ, start_sampling, end_
     N = data.n_states
     rowsum = scratch.rowsum
     cur = scratch.cur
-    # Everything the filter pushes probability through comes off the PROPOSAL, not
-    # off `data` — that is the one behavioural seam this refactor opens, and with
+    # Everything the filter pushes probability through comes off the proposal, not
+    # off `data`, that is the one behavioural seam this refactor opens, and with
     # the default proposal the two are the same objects.
     p_trans = proposal.trans_mat
     p_start = proposal.starting_state
@@ -217,14 +203,14 @@ function forward_filter!(probs, trans_cache, scratch, xᵢ, start_sampling, end_
         probs[1, s] = cur[s] / z0
     end
     # trans_cache[:, :, 1] is never read (backward_sample! walks from n_t down to
-    # 2, reading trans_cache[j] for j >= 2 only), so it is left untouched — the
+    # 2, reading trans_cache[j] for j >= 2 only), so it is left untouched, the
     # buffer is reused across individuals and stale values here are harmless.
 
     @inbounds for j in 2:n_t
         t = start_sampling + j - 1
         trans = view(trans_cache, :, :, j)
         # OFF-BY-ONE, load-bearing: `trans_cache[:, :, j]` is the matrix for the
-        # step (j-1 -> j) in WINDOW indices, i.e. absolute (t-1 -> t). The backward
+        # step (j-1 -> j) in window indices, i.e. absolute (t-1 -> t). The backward
         # pass therefore reads `trans_cache[:, :, j+1]` when moving from window
         # index j to j+1. Slice 1 is never written and never read.
         transition_matrix_at!(trans, rowsum, p_trans, model, data, X, i, t - 1)
@@ -234,7 +220,7 @@ function forward_filter!(probs, trans_cache, scratch, xᵢ, start_sampling, end_
         rest_w = p_rest(model, data, X, i, t, N, affected)
 
         # pred = trans' * probs[j-1, :], then multiply in the observation and
-        # coupling weights — fused into one pass over the N candidate states.
+        # coupling weights, fused into one pass over the N candidate states.
         z = zero(eltype(probs))
         for b in 1:N
             acc = zero(eltype(probs))
@@ -269,7 +255,7 @@ already-sampled next state. Writes into `xᵢ` (a view into `X`).
 function backward_sample!(probs, trans_cache, xᵢ, start_sampling, end_sampling, model, data::EpidemicData, X, i, rng)
     n_t = length(xᵢ)
     N = data.n_states
-    # Reuse the same sweep-level scratch the forward pass used — `w` is a buffer
+    # Reuse the same sweep-level scratch the forward pass used: `w` is a buffer
     # kept solely for this loop, so it never collides with `cur`.
     w = _filter_scratch(data, n_t).w
 
@@ -309,15 +295,15 @@ end
 # `backward_sample!`: the candidate's is accumulated as it is drawn, the current
 # path's by replacing each draw with a lookup.
 #
-# WHY THESE ARE SEPARATE FUNCTIONS rather than a keyword on `backward_sample!`:
+# Why these are separate functions rather than a keyword on `backward_sample!`:
 # `backward_sample!` is on the hot path of every `iffbs!` sweep, and adding a
 # `log` per timepoint (plus a branch the compiler has to hoist) to a function that
-# does not need it is exactly the kind of change CLAUDE.md's "measure each change
-# alone" rule exists to prevent. The duplication is ~20 lines and buys a hot path
-# that is byte-for-byte what it was.
+# does not need it is the kind of change worth measuring on its own before
+# making. The duplication is ~20 lines and buys a hot path that is
+# byte-for-byte what it was.
 #
-# The three of them MUST stay in lockstep on two details or the MH ratio is wrong:
-#   * the weight is `probs[j, a] * trans_cache[a, x[j+1], j+1]` — note the `j+1`
+# The three of them must stay in lockstep on two details or the MH ratio is wrong:
+#   * the weight is `probs[j, a] * trans_cache[a, x[j+1], j+1]`: note the `j+1`
 #     on the cache (see the off-by-one note in `forward_filter!`);
 #   * the degenerate `z <= 0` branch falls back to a UNIFORM distribution, so the
 #     scorer must return `log(1/N)` there, not `-Inf`.
@@ -326,16 +312,16 @@ end
     backward_logq(probs, trans_cache, path, data, n_t) -> Real
 
 The log-density of `path` under the backward-sampling kernel that
-[`backward_sample!`](@ref) draws from — i.e. `log q(path)` for the proposal whose
+[`backward_sample!`](@ref) draws from: i.e. `log q(path)` for the proposal whose
 forward pass produced `probs`/`trans_cache`.
 
 Consumes NO randomness. That matters: with the proposal equal to the target the
 acceptance ratio is identically 1, `iffbs_mh!` skips its `rand()` (see
 [`iffbs_mh_individual!`](@ref)), and the whole MH sweep then draws exactly the
-same random numbers in the same order as the plain `iffbs!` sweep — which is what
+same random numbers in the same order as the plain `iffbs!` sweep, which is what
 makes the RNG-stream equivalence test possible.
 
-`path` is indexed 1:n_t in WINDOW coordinates (window index `j` is absolute time
+`path` is indexed 1:n_t in window coordinates (window index `j` is absolute time
 `start_sampling + j - 1`), matching `xᵢ` in [`backward_sample!`](@ref).
 """
 function backward_logq(probs, trans_cache, path, data::EpidemicData, n_t::Int)
@@ -367,11 +353,11 @@ end
 """
     backward_sample_logq!(dest, probs, trans_cache, data, n_t, rng) -> Real
 
-[`backward_sample!`](@ref), but writing into `dest` (window coordinates, NOT a
+[`backward_sample!`](@ref), but writing into `dest` (window coordinates, not a
 view into `X`) and returning the log-density of what it drew.
 
 Writing somewhere other than `X` is required, not stylistic: the MH step has to
-score the CURRENT path against the same filter, so `X` must still hold it when the
+score the current path against the same filter, so `X` must still hold it when the
 candidate is drawn.
 
 Draws exactly the same categorical variates, in the same order, as
@@ -419,7 +405,7 @@ end
 Resample individual `i`'s whole trajectory in place.
 
 Reverses `i`'s contribution out of the aggregates, runs the forward filter and
-backward sample, then re-applies `i`'s new contribution — leaving the aggregates
+backward sample, then re-applies `i`'s new contribution: leaving the aggregates
 exactly consistent with the updated `X`, and giving `i` leave-one-out statistics
 while it is being resampled.
 """
@@ -428,7 +414,7 @@ function iffbs_individual!(model, data::EpidemicData, X, i, rng,
     start_sampling, end_sampling = data.sampling_period[i]
     xᵢ = @view X[start_sampling:end_sampling, i]
 
-    # `apply_summaries!` (aggregates.jl), NOT `for ds in data.derived_summaries`:
+    # `apply_summaries!` (aggregates.jl), not `for ds in data.derived_summaries`:
     # the summaries are a Tuple of distinct closure types, so a plain loop infers
     # their union and dispatches at runtime on every call. These two loops were
     # 42.7% of a sweep's self time, both flagged for GC and dynamic dispatch.
@@ -460,7 +446,7 @@ Assumes the aggregates already agree with `X` on entry (see
 sweep never rebuilds them.
 """
 function iffbs!(model, data::EpidemicData, X, rng; proposal=iffbs_proposal(data))
-    # Built ONCE per sweep, not once per individual: `IFFBSProposal` holds a
+    # Built once per sweep, not once per individual: `IFFBSProposal` holds a
     # `TransitionSpec` (which has array fields, so it is not isbits), and
     # constructing it inside the loop would be one heap allocation per individual
     # for no reason.

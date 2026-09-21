@@ -164,7 +164,7 @@ end
 #     arguments : 0.0032 s,         224 bytes allocated   -> 189x
 #
 # This block was 11.7% of a sweep (0.541 s) purely from that. Exactly the trap
-# CLAUDE.md's performance section describes — `data.season` reports the right
+# the cached-rate trap describes: `data.season` reports the right
 # type either way, so only a benchmark reveals it.
 #
 # The count loop is ALSO restructured: season is a function of `t` alone, so one

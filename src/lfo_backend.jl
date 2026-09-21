@@ -1,18 +1,13 @@
 # Running an LFO sweep somewhere other than this process.
 #
-# A sweep is N independent fits of hours each. That is a SLURM job array, not a
-# Distributed allocation: array tasks are independently schedulable and
-# independently retryable, and one dying does not poison the rest. (Reaching for
-# SlurmClusterManager/ClusterManagers is the natural instinct and the wrong shape
-# here -- they need an existing allocation, inherit its arguments, and share the
-# fate of their workers.)
+# A sweep is N independent fits of hours each, which is a job array rather than
+# a Distributed allocation: array tasks are independently schedulable and
+# retryable, and one dying does not poison the rest.
 #
-# THE MECHANISM. `lfo_cv` runs in your session with `spec.fit` as a closure. An
-# array task starts cold and cannot receive a closure, and serialised closures do
-# not survive a Julia version change. So the user's own script is re-entrant: it
-# runs as the LAUNCHER when no work item is set in the environment, and as a
-# WORKER when one is. The `spec` is reconstructed simply because the script above
-# the call re-executes.
+# An array task starts cold and cannot receive a closure, so the user's own
+# script is re-entrant: launcher when no work item is set in the environment,
+# worker when one is. The spec is reconstructed because the script above the
+# call re-executes.
 
 """
     LocalBackend()
@@ -49,7 +44,7 @@ distinguishing evidence is a per-node failure tally, which is why
 
 # max_array_index
 
-Clusters cap the array INDEX, not the count: with a cap of 99, `--array=99-197`
+Clusters cap the array index, not the count: with a cap of 99, `--array=99-197`
 is rejected outright. Sweeps longer than the cap are split into several
 submissions with an offset, automatically.
 """
@@ -121,7 +116,7 @@ end
 How far the sweep has got: how many items have results, which are missing, and
 **a per-node failure tally**.
 
-Completion is counted from RESULT FILES on disk, never from a progress log: a
+Completion is counted from result files on disk, never from a progress log: a
 progress row is written only when a task reaches the end of its script, so tasks
 that die at startup leave no row and are invisible. That mistake once had a
 sweep reported as "zero failures" while 174 tasks were dead.
@@ -193,7 +188,7 @@ function resubmit(h::SweepHandle; exclude = nothing, partition = nothing)
         julia = be.julia, project = be.project, script = be.script,
         extra = be.extra, max_array_index = be.max_array_index))
 
-    # The missing set is not contiguous, so tasks index a MANIFEST of the items
+    # The missing set is not contiguous, so tasks index a manifest of the items
     # still to do rather than doing arithmetic on the array id.
     manifest = joinpath(h.outdir, "manifest_redo_$(length(st.missing)).txt")
     open(manifest, "w") do io

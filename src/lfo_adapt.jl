@@ -1,20 +1,13 @@
 # Adaptation diagnostics for samplers running inside a truncated LFO window.
 #
-# WHY THIS EXISTS. Truncation clamps the fields that window a likelihood, so any
-# parameter scored over `sampling_period` (or over any other clamped field) has a
-# FLAT likelihood beyond the cutoff: proposal and current state score identically
-# and the move is accepted on the prior alone.
-#
-# A random-walk adapter targeting ~0.234 then sees ~100% acceptance and widens
-# forever. Measured on a real fit, a changepoint bounded in 1:160 reached a
-# proposal sd of 939 over 5000 sweeps while never dropping below 0.77
-# acceptance. At that width almost every proposal is out of range and discarded
-# as a no-op -- and because out-of-range proposals were not counted as
-# REJECTIONS, the adapter never learned. The parameter was frozen while
-# reporting healthy acceptance.
-#
-# That reads as healthy in every summary. It needs an explicit check, which is
-# what this file provides.
+# Truncation clamps the fields that window a likelihood, so a parameter scored
+# over a clamped field has a flat likelihood beyond the cutoff and its moves
+# are accepted on the prior alone. A random-walk adapter targeting ~0.234 then
+# sees ~100% acceptance and widens forever: measured on a real fit, a
+# changepoint bounded in 1:160 reached a proposal sd of 939 while never
+# dropping below 0.77 acceptance. Out-of-range proposals were discarded as
+# no-ops rather than counted as rejections, so the adapter never learned and
+# the parameter sat frozen while reporting healthy acceptance.
 
 """
     AdaptTrace(name; target_lo=0.39, target_hi=0.49)
@@ -67,14 +60,14 @@ Did this kernel's adaptation converge, or run away?
 Returns `(; ok, warnings, final_acceptance, final_scale, scale_ratio)`. Each
 warning names a specific pathology rather than saying "looks odd":
 
-- **acceptance never fell to target** — the signature of a flat likelihood. Under
+- **acceptance never fell to target**: the signature of a flat likelihood. Under
   LFO this usually means the parameter is being scored over a window that
   truncation emptied, so proposals beyond the cutoff are decided by the prior.
-- **proposal scale grew by more than `scale_growth`x** — an adapter that never
+- **proposal scale grew by more than `scale_growth`x**, an adapter that never
   found a rejection to push back against.
 - **proposal scale exceeds the support** — at that width nearly every proposal is
   illegal, so the chain is effectively frozen wherever it happens to sit.
-- **out-of-range proposals not counted as rejections** — reported whenever they
+- **out-of-range proposals not counted as rejections**: reported whenever they
   are a large share of proposals, because that is what lets the previous two
   pathologies persist unnoticed.
 
@@ -126,7 +119,7 @@ end
 Which declared extras become UNINFORMATIVE beyond `cutoff` once truncated.
 
 A `clamp`ed or `filter`ed extra carries no information past the cutoff by
-construction — that is the point of truncating it — so any likelihood windowed by
+construction, that is the point of truncating it: so any likelihood windowed by
 one of them is flat out there. Listing them makes the consequence visible before
 a sweep runs, rather than after a 2-hour fit produces a diverged adapter.
 """

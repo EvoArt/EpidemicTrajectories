@@ -1,25 +1,15 @@
-# Scoring one leave-future-out window: forward-simulate the population from the
-# cutoff and score the observations that follow, cell by cell.
+# Scoring one leave-future-out window: forward-simulate the population from
+# the cutoff, then score the observations that follow cell by cell.
 #
-# WHAT THE USER SUPPLIES. Two functions, in keeping with the package's central
-# rule that it never assumes what the user's arrays mean:
-#
-#   cell_logdensity(model, data, X, i, t) -> Float64
-#       the log density of individual `i`'s observation at time `t`, given the
-#       (simulated) state in `X`. `-Inf` means "this trajectory is inadmissible
-#       for this individual" and is charged to that individual's cell ONLY.
-#
-#   is_informative(data, i, t) -> Bool  (optional)
-#       whether that cell's density depends on the latent state at all. On the
-#       badger data only ~2% of cells did -- the rest contributed a constant
-#       identical under every granularity -- which is why all three arms agreed
-#       to within a few nats. Reported so the question is asked BEFORE a margin
-#       is interpreted, not after.
+# The user supplies `cell_logdensity` and, optionally, `is_informative`. The
+# second is worth supplying: on the badger data only ~2% of cells depended on
+# the latent state at all, so the granularity axis had almost nothing to
+# redistribute and every arm agreed to within a few nats.
 
 """
     forward_simulate(rng, model, data, X, t_star, M; constrain=nothing) -> Matrix
 
-One forward trajectory for the WHOLE population over `t_star+1 : t_star+M`,
+One forward trajectory for the whole population over `t_star+1 : t_star+M`,
 starting from the states in `X` at `t_star`.
 
 The population is simulated jointly, not individual by individual: each step's
@@ -110,9 +100,9 @@ end
 Per-cell log densities for one draw over one window, averaged over `n_sim`
 forward trajectories.
 
-`-Inf` is charged to the offending individual's OWN cell and the loop continues.
+`-Inf` is charged to the offending individual's own cell and the loop continues.
 Returning early on the first inadmissible individual would silently re-impose
-joint scoring no matter which granularity was asked for — the single easiest way
+joint scoring no matter which granularity was asked for: the single easiest way
 to get this wrong.
 """
 function score_window(model, data::EpidemicData, X, t_star::Int, M::Int,
@@ -142,7 +132,7 @@ function score_window(model, data::EpidemicData, X, t_star::Int, M::Int,
         end
         if survival_weight !== nothing
             # The weight converting the constrained proposal back to the true
-            # kernel. It MUST cover exactly the individuals the constraint
+            # kernel. It must cover exactly the individuals the constraint
             # covered -- see `survival_constrained`.
             for (key, w) in survival_weight(model, data, Xf, t_star, M, g)
                 acc[key] = get(acc, key, 0.0) + w
@@ -179,7 +169,7 @@ prove was alive.
 
 **The constraint and its weight must be gated on exactly the same condition.**
 Constraining an individual without accumulating its weight deletes that
-individual's death branch with nothing to correct it — and a death changes the
+individual's death branch with nothing to correct it: and a death changes the
 group's composition, hence every other individual's transition probabilities.
 That is a BIAS, not a variance effect: it does not shrink with `n_sim`. Measured
 against exact enumeration on a small model: **-0.474 nats at n=3, -1.14 nats at
@@ -187,7 +177,7 @@ n=8**, versus ~1e-3 once both halves were gated together.
 
 It was invisible to earlier checks because those compared two estimators to each
 other with nothing pinning either to the truth. **A-versus-B agreement is not a
-correctness test** — at least one test must pin an absolute value.
+correctness test**, at least one test must pin an absolute value.
 
 This constructor returns both halves together precisely so they cannot drift.
 
@@ -197,7 +187,7 @@ Not the unconditional predictive `p(y | y_{1:t})`, but the conditional
 `p(y | y_{1:t}, present through t_c)`. At a step where an individual was not
 observed but is known present later, being absent explains a non-observation
 perfectly, so the excluded branch carries real mass that the weight does not
-restore. Conditioning on it is usually what you want — `t_c` is observed data —
+restore. Conditioning on it is usually what you want, `t_c` is observed data —
 but any rival estimator must be made to condition identically or the two are not
 estimating the same thing.
 """
@@ -216,7 +206,7 @@ function survival_constrained(known_present)
         for t in (t_star + 1):last_t, i in 1:data.n_individuals
             f_i, l_i = data.sampling_period[i]
             (f_i <= t <= min(l_i, data.n_timepoints)) || continue
-            # EXACTLY the condition `constrain` used -- co-gated by construction.
+            # exactly the condition `constrain` used -- co-gated by construction.
             known_present(i, t) || continue
             transition_matrix_at!(P, rowsum, data.trans_mat, model, data, Xf, i, t - 1)
             p_surv = max(1.0 - Float64(P[Xf[t-1, i], absorbing]), 1e-12)

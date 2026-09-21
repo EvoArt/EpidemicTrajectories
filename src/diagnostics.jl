@@ -1,22 +1,14 @@
-# The checks and plots that turn a `SummaryResult` into a verdict.
+# Checks and plots that turn a `SummaryResult` into a verdict.
 #
-# These are STUBS. The implementations live in weak-dependency extensions, so that
-# neither `HypothesisTests` nor `Makie` enters the package's core dependency list —
-# the core stays at five (four plus the `Serialization` stdlib), and a user who
-# only wants residual VALUES pays for nothing else.
-#
-# Load the extension by loading its package:
-#
-#     using HypothesisTests   # enables uniformity_test, pvalue_distribution, pi_05
-#     using CairoMakie        # enables residual_plot, pvalue_plot, residual_qq
-#
-# Calling one of these without its package loaded gives a clear error saying which
-# one to load, rather than a `MethodError` about an undefined function.
+# Stubs: the implementations live in weak-dependency extensions, so neither
+# HypothesisTests nor Makie enters the core dependency list. Load the extension
+# by loading its package. Calling one without it gives a clear error naming the
+# package rather than a MethodError.
 
 """
     uniformity_test(result, name; per_draw=true) -> NamedTuple
 
-Test whether a `:pit` summary's residuals are Uniform(0,1) — the question a PIT
+Test whether a `:pit` summary's residuals are Uniform(0,1), the question a PIT
 residual exists to answer. Requires `using HypothesisTests`.
 
 Returns `(; statistic, pvalue, n, n_draws)`.
@@ -24,7 +16,7 @@ Returns `(; statistic, pvalue, n, n_draws)`.
 `per_draw=true` (the default) runs the Anderson–Darling test **within each draw**
 and reports the MEDIAN p-value across draws. That is the correct treatment:
 residuals from the same individual at different draws are correlated, so pooling
-them inflates the effective sample size and makes the test anticonservative — it
+them inflates the effective sample size and makes the test anticonservative: it
 will reject a model that is fine. Pass `per_draw=false` to pool anyway, knowing
 that.
 
@@ -56,7 +48,7 @@ function pvalue_distribution end
     pi_05(result, name) -> Float64
 
 π₀.₀₅: the posterior probability that a draw's uniformity test rejects at the 5%
-level — i.e. the fraction of draws whose p-value falls below 0.05. Requires
+level, i.e. the fraction of draws whose p-value falls below 0.05. Requires
 `using HypothesisTests`.
 
 **Read it against 0.05, not against 0.** A correctly specified model gives ≈0.05
@@ -116,7 +108,7 @@ function pvalue_plot! end
 
 A QQ plot of a summary's residuals against Uniform(0,1). Requires a Makie backend.
 
-Complements [`residual_plot`](@ref): a histogram shows WHERE the mass is, a QQ plot
+Complements [`residual_plot`](@ref): a histogram shows where the mass is, a QQ plot
 shows how far the whole distribution departs and in which direction — residuals
 bowing above the diagonal mean the modelled waiting times are too long, below means
 too short. That directional reading is what localises a misspecification to a
@@ -140,7 +132,7 @@ One figure summarising every `:pit` summary in a result: a residual histogram an
 a p-value histogram per summary, one row each. Requires both `using HypothesisTests`
 and a Makie backend.
 
-This is the "did my model fit?" view — the convenience layer over the individual
+This is the "did my model fit?" view: the convenience layer over the individual
 plots, for when you want the answer rather than a specific panel. `:raw` summaries
 are skipped, since uniformity is not a meaningful question to ask of them.
 """

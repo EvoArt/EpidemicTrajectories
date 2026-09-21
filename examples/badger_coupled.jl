@@ -5,7 +5,7 @@
 # `coupled_transitions=[(:S, :E)]` lets the sampler skip any neighbour whose realised
 # move the focal cannot affect — exact, not an approximation (a skipped move has the
 # same probability under every candidate focal state and cancels on normalisation).
-# CLAUDE.md measures this at ~10x on the badger coupling.
+# Measured at ~10x on the badger coupling.
 #
 # Everything else is identical to badger_naive.jl.
 

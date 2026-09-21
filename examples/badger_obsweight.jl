@@ -4,7 +4,7 @@
 # `w[X[t,i]]`, the weight of the state the badger is actually in. The vector-
 # returning `observation_process` (stages 1-2) allocates a whole array per (i,t)
 # and throws all but one element away: on badgers ~187k arrays of Duals per
-# gradient call. `observation_weight` returns just that one entry. CLAUDE.md
+# gradient call. `observation_weight` returns just that one entry. The notes
 # measures the obs-term gradient going 0.226 → 0.075 s (3.0x), 18 MB → 16 bytes.
 #
 # `epidemic_data` and the coupling are unchanged from badger_coupled.jl; only the

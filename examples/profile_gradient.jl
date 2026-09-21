@@ -4,7 +4,7 @@
 # Profiles the full log-density gradient (transitions + observation, scalar obs
 # path), which is exactly what AdvancedHMC calls L=30 times per sweep.
 #
-# READING THE OUTPUT (per CLAUDE.md, learned the hard way on 2026-07-17):
+# Reading the output (learned the hard way on 2026-07-17):
 #   * Sort by TOTAL when deciding WHAT TO CHANGE. A self%-sorted profile of the
 #     coupling term once looked flat at 6.4% while its true total was 69.5%, and
 #     nearly sent an investigation in the wrong direction.

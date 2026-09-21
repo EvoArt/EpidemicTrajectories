@@ -1,21 +1,13 @@
-# Leave-future-out cross-validation: the generic loop, the granularity axis, and
-# the result object.
+# Leave-future-out cross-validation: the generic loop, the granularity axis,
+# and the result object.
 #
-# WHERE THIS SHOULD EVENTUALLY LIVE. Nothing below mentions epidemics: it needs a
-# fit callback, a per-cell score callback, and a truncation callback. It sits
-# here for now because `truncate_data` does, and because this is where it is
-# exercised. If a second, non-epidemic user appears it should move to a
-# workflow-level package -- see LFO_PACKAGING_GUIDE.md.
+# Nothing below mentions epidemics; it needs a fit callback, a per-cell score
+# callback and a truncation callback. It sits here because `truncate_data`
+# does, and because this is where it is exercised.
 #
-# THE ESTIMAND, AND WHY IT IS NOT LOO OR WAIC. LFO scores
-#
-#     ELPD = sum over cutoffs t of  log p(y_{t+1:t+M} | y_{1:t})
-#
-# LOO and WAIC are pointwise leave-ONE-out criteria and estimate the same
-# quantity as each other. Leaving out y_t while conditioning on y_{t-1} AND
-# y_{t+1} lets the model interpolate -- it uses the future to predict the past,
-# which is not the predictive task. WAIC is arguably worse than PSIS-LOO here
-# because it carries no k-hat diagnostic, so it fails silently.
+# LFO scores ELPD = sum over cutoffs of log p(y_{t+1:t+M} | y_{1:t}). LOO and
+# WAIC estimate something else: leaving out y_t while conditioning on both
+# neighbours lets the model interpolate, using the future to predict the past.
 
 """
     Granularity
@@ -31,19 +23,19 @@ an absorbing dead state, `Joint()` lost 46-70% of windows to `-Inf` where
 
 The choice is a *modelling* one, not an implementation detail:
 
-- `Joint()` — one cell for the whole window. This is Bürkner, Gabry & Vehtari's
+- `Joint()`, one cell for the whole window. This is Bürkner, Gabry & Vehtari's
   (2020) block predictive density, and what they prescribe for dependent series.
-- `ByGroup(g)` — one cell per (group, step), with `g` a per-individual group
+- `ByGroup(g)`, one cell per (group, step), with `g` a per-individual group
   vector. Keeps within-group dependence, discards between-group.
-- `Pointwise()` — one cell per (individual, step). This is the standard ELPD of
+- `Pointwise()`, one cell per (individual, step). This is the standard ELPD of
   Vehtari, Gelman & Gabry (2017) — "pointwise" is in the acronym.
 
-`Pointwise` and `Joint` are DIFFERENT ESTIMANDS, equal only if cells are
+`Pointwise` and `Joint` are different ESTIMANDS, equal only if cells are
 independent given the data. For a transmission model they are not, and that
 dependence is the signal. The gap is a multi-information term,
 `sum_c log p(y_c) - log p(y_all) = -MI <= 0`.
 
-**Never compare totals across granularities** — a pointwise total sums `N*M`
+**Never compare totals across granularities**, a pointwise total sums `N*M`
 densities per window, a joint total sums one. [`compare`](@ref) refuses.
 """
 abstract type Granularity end
@@ -65,8 +57,8 @@ _granularity_name(::ByGroup) = :by_group
 """
     cell_of(g::Granularity, i, m) -> Any
 
-Which cell individual `i` at forecast step `m` is charged to. The ONLY thing a
-granularity does: same trajectories, same densities, same weights — only the
+Which cell individual `i` at forecast step `m` is charged to. The only thing a
+granularity does: same trajectories, same densities, same weights: only the
 bucket changes. That is what makes `Joint()` reproduce an unbucketed scorer
 exactly, which the test suite asserts.
 """
@@ -86,13 +78,13 @@ log importance weights; pass zeros under exact refitting.
 
 **The normaliser matters, and getting it wrong is silent.** Each cell's score is
 a self-normalised weighted average over draws, so `logsumexp_s(logw)` must be
-subtracted per cell — with unnormalised weights that is `log S`. Omit it and every
+subtracted per cell: with unnormalised weights that is `log S`. Omit it and every
 cell is inflated by `log S`, so a pointwise total (many cells) gains
 `n_cells * log S` over a joint total (one cell). Both totals stay finite and
 plausible; only the comparison between them is destroyed, and nothing about the
 numbers looks wrong.
 
-A cell that is `-Inf` for EVERY draw makes the whole window `-Inf`, which is
+A cell that is `-Inf` for every draw makes the whole window `-Inf`, which is
 honest: no draw could explain that observation. A cell that is `-Inf` for SOME
 draws costs only those draws, which is the entire point of the axis.
 """
@@ -124,11 +116,16 @@ end
 One cutoff's outcome, with the diagnostics needed to judge it.
 
 `n_informative` is the count of cells whose density actually depends on the
-latent state. It matters more than it sounds: on the badger data only ~2% of
-cells carried an observation at all — the rest contributed a state-independent
-constant identical under every granularity — so the granularity axis had almost
-nothing to redistribute and all three arms agreed to within a few nats. Reading
-that number first tells you whether a comparison can resolve anything.
+latent state, or `nothing` when the spec supplied no `is_informative`. It matters
+more than it sounds: on the badger data only ~2% of cells carried an observation
+at all, the rest contributed a state-independent constant identical under every
+granularity — so the granularity axis had almost nothing to redistribute and all
+three arms agreed to within a few nats. Reading that number first tells you
+whether a comparison can resolve anything.
+
+`nothing` is deliberately distinct from `0`: "nobody asked" and "not one cell is
+informative" are opposite situations, and collapsing them would let the second —
+which means the comparison is meaningless, hide as the first.
 """
 struct WindowResult
     cutoff::Int
@@ -136,7 +133,7 @@ struct WindowResult
     n_draws::Int
     n_finite::Dict{Symbol,Int}          # draws with a finite score
     n_cells::Dict{Symbol,Int}
-    n_informative::Int
+    n_informative::Union{Int,Nothing}   # `nothing` = not reported (see above)
     fit_seconds::Float64
     score_seconds::Float64
 end
@@ -162,8 +159,8 @@ cutoffs(r::LFOResult) = [w.cutoff for w in r.windows]
 
 Total ELPD across every window, under one granularity.
 
-Only meaningful against another total computed under the SAME granularity and
-the SAME cutoffs; see [`compare`](@ref), which enforces both.
+Only meaningful against another total computed under the same granularity and
+the same cutoffs; see [`compare`](@ref), which enforces both.
 """
 function elpd(r::LFOResult, g::Symbol = first(r.granularities))
     g in r.granularities ||
@@ -173,14 +170,20 @@ end
 elpd(r::LFOResult, g::Granularity) = elpd(r, _granularity_name(g))
 
 """
-    n_informative(r::LFOResult) -> Int
+    n_informative(r::LFOResult) -> Union{Int,Nothing}
 
-Total cells across the sweep whose density depends on the latent state. If this
-is a small fraction of the nominal cell count, no granularity can discriminate
-much and the comparison is close to a null experiment — worth knowing BEFORE
-interpreting a margin.
+Total cells across the sweep whose density depends on the latent state, or
+`nothing` if the spec supplied no `is_informative`.
+
+If this is a small fraction of the nominal cell count, no granularity can
+discriminate much and the comparison is close to a null experiment: worth
+knowing before interpreting a margin. Supplying `is_informative` is optional but
+strongly recommended for exactly that reason.
 """
-n_informative(r::LFOResult) = sum(w.n_informative for w in r.windows)
+function n_informative(r::LFOResult)
+    any(w -> w.n_informative === nothing, r.windows) && return nothing
+    sum(w.n_informative for w in r.windows)
+end
 
 """
     compare(a::LFOResult, b::LFOResult; granularity) -> NamedTuple

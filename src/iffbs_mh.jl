@@ -1,30 +1,15 @@
-# iFFBS as a PROPOSAL, corrected by Metropolis-Hastings.
+# iFFBS as a proposal, corrected by Metropolis-Hastings.
 #
-# `iffbs!` is an exact Gibbs step ONLY when the chain the forward filter runs is
-# the chain the likelihood scores. Three ordinary situations break that:
+# `iffbs!` is exact only when the filter's chain is the one the likelihood
+# scores. A semi-Markov target, a deliberately cheapened proposal, or a target
+# carrying factors the filter does not (the `entry_time` gate, an approximate
+# `coupling_trans_mat`, a drifted `rest_contribution`) all break that, and all
+# take the same fix: keep iFFBS, treat its output as a proposal, accept or
+# reject.
 #
-#   * a SEMI-MARKOV target — the `E -> I` hazard depends on time-since-exposure,
-#     which no first-order filter can represent (the paper's SM-iFFBS);
-#   * a deliberately cheapened proposal — drop the between-individual coupling
-#     term from the filter (the paper's MHiFFBS);
-#   * a target carrying factors the filter does not — this package's `entry_time`
-#     gate, an approximate `coupling_trans_mat`, a hand-written
-#     `rest_contribution` that has drifted from `neighbor_logprob`.
-#
-# All three are the same fix: keep iFFBS, treat its output as a PROPOSAL in an
-# independence Metropolis-Hastings step, and accept with
-#
-#     log alpha = [log pi(x_can | x_rest) - log pi(x_cur | x_rest)]
-#               - [log q(x_can)           - log q(x_cur)]
-#
-# Reference: Touloupou, Finkenstadt & Spencer (2020), "Scalable Bayesian Inference
-# for Coupled Hidden Markov and Semi-Markov Models", JCGS 29(2):238-249,
-# section 3.3.2 (Algorithm 2) and section 4.3.
-#
-# The paper is explicit that the UNCORRECTED version is wrong, not merely
-# approximate: running a mismatched proposal as though it were a Gibbs step is the
-# failure its Supplementary section A documents. Hence `epidemic_latent_sampler`
-# refuses `mh=false` together with a `proposal`.
+# Touloupou, Finkenstadt & Spencer (2020), JCGS 29(2):238-249, section 3.3.2
+# and section 4.3. The paper is explicit that the uncorrected version is wrong,
+# not merely approximate.
 
 """
     MHStats(n_individuals)
@@ -34,14 +19,14 @@ Per-individual acceptance telemetry for [`iffbs_mh!`](@ref).
 Fields:
 - `proposed[i]` — candidates that DIFFERED from the current path (the ones an
   accept/reject decision was actually made about)
-- `accepted[i]` — how many of those were accepted
-- `identical[i]` — proposals that reproduced the current path exactly. Counted
+- `accepted[i]`, how many of those were accepted
+- `identical[i]`: proposals that reproduced the current path exactly. Counted
   SEPARATELY, and deliberately: folding them into the denominator makes the
   reported rate depend on how often the chain is frozen rather than on how good
   the proposal is. `acceptance_rate` excludes them; [`identical_rate`](@ref)
   reports them on their own.
-- `last_logratio[i]` — the last `log alpha` computed for `i` (`NaN` if none yet)
-- `max_abs_logratio`, `worst_individual` — the running worst `|log alpha|` and who
+- `last_logratio[i]`, the last `log alpha` computed for `i` (`NaN` if none yet)
+- `max_abs_logratio`, `worst_individual`, the running worst `|log alpha|` and who
   produced it. These are what makes the sampler its own exactness diagnostic: with
   the proposal equal to the target every ratio must be 0, so a non-zero maximum
   names the individual whose conditional the filter is getting wrong. See
@@ -112,7 +97,7 @@ end
     stats.last_logratio[i] = logratio
     a = abs(logratio)
     # `>` not `>=`, and NaN compares false, so a NaN ratio never becomes "the
-    # worst" — it is reported through `last_logratio` instead.
+    # worst": it is reported through `last_logratio` instead.
     if a > stats.max_abs_logratio[]
         stats.max_abs_logratio[] = a
         stats.worst_individual[] = i
@@ -142,9 +127,9 @@ them as little as plain [`iffbs_individual!`](@ref) does:
 
     1. log pi_cur     -- FREE: on entry the aggregates already agree with X,
                          which still holds the current path
-    2. save x_cur; REVERSE i out of the aggregates      (1 reverse)
+    2. save x_cur; reverse i out of the aggregates      (1 reverse)
     3. forward filter under `proposal`, at the leave-one-out aggregate state
-    4. score log q_cur (no RNG); draw x_can + log q_can into scratch, NOT into X
+    4. score log q_cur (no RNG); draw x_can + log q_can into scratch, not into X
     5. identical? re-apply and return                   (1 apply)
     6. write x_can into X; APPLY                        (1 apply); log pi_can
     7. accept -> done. reject -> reverse, restore x_cur, apply  (+1 rev +1 app)
@@ -161,22 +146,22 @@ decision then costs no randomness, so a run that always accepts draws exactly th
 variates `iffbs!` would, in the same order.
 
 **It does not quite give bit-identical streams for `proposal == target`, and the
-reason is worth knowing.** The EXACT ratio there is 0, but the COMPUTED one is a
+reason is worth knowing.** The exact ratio there is 0, but the COMPUTED one is a
 difference of sums of order 1e-14 whose sign is arbitrary. A ratio of `-1e-16`
 takes the `log(rand(rng)) < logratio` branch, consumes a variate, and then accepts
-anyway — same trajectory, different stream. The test suite therefore checks
-stream equivalence under `force=:accept`, and checks the SIZE of the ratio
+anyway: same trajectory, different stream. The test suite therefore checks
+stream equivalence under `force=:accept`, and checks the size of the ratio
 separately via [`check_iffbs_exact`](@ref). No tolerance is applied to the
 comparison against zero: treating `|log alpha| <= tol` as an automatic accept
 would trade a real (if tiny) bias for a cosmetic property.
 
 ## Keywords
 
-- `force` — `:none` (decide normally), `:accept`, `:reject`. Test hooks; forcing
+- `force`: `:none` (decide normally), `:accept`, `:reject`. Test hooks; forcing
   never consumes randomness, so `force=:accept` on an exact spec leaves the RNG
-  stream identical to `iffbs!`'s. `force=:reject` is the ONLY way to exercise the
+  stream identical to `iffbs!`'s. `force=:reject` is the only way to exercise the
   restore path, which is the branch most likely to harbour a bookkeeping bug.
-- `on_nonfinite` — `:reject` (default) or `:error`, for a `NaN` ratio. `+Inf`
+- `on_nonfinite`: `:reject` (default) or `:error`, for a `NaN` ratio. `+Inf`
   accepts and `-Inf` rejects without complaint: both are meaningful (a current
   path unreachable under the proposal, and a candidate impossible under the
   target, respectively).
@@ -192,7 +177,7 @@ function iffbs_mh_individual!(model, data::EpidemicData, X, i::Int, rng,
 
     # --- 1. the current path's conditional, at the standing invariant ---------
     # Aggregates agree with X, `data._focal[] == -1`: exactly the state
-    # `epidemic_loglik` assumes. Doing this FIRST is what keeps the accept path
+    # `epidemic_loglik` assumes. Doing this first is what keeps the accept path
     # at the same summary cost as `iffbs_individual!`.
     logpi_cur = Float64(target(model, data, X, i))
 
@@ -202,7 +187,7 @@ function iffbs_mh_individual!(model, data::EpidemicData, X, i::Int, rng,
     scratch = _filter_scratch(data, n_t)
     path_cur = view(scratch.path_cur, 1:n_t)
     path_can = view(scratch.path_can, 1:n_t)
-    # WINDOW coordinates: path index j is absolute time first_t + j - 1.
+    # window coordinates: path index j is absolute time first_t + j - 1.
     @inbounds for j in 1:n_t
         path_cur[j] = X[first_t + j - 1, i]
     end
@@ -301,7 +286,7 @@ One full MH-corrected iFFBS sweep: propose and accept/reject every individual's
 trajectory in turn, each conditioning on the others' current trajectories.
 
 Like [`iffbs!`](@ref), assumes the aggregates agree with `X` on entry and
-preserves that on exit — on BOTH branches of every decision.
+preserves that on exit, on both branches of every decision.
 
 `proposal` defaults to `iffbs_proposal(data)` and `target` to
 `epidemic_conditional_loglik(data)`. With both at their defaults this is the exact
@@ -310,7 +295,7 @@ self-check but wasteful as a sampler; use [`iffbs!`](@ref) for that, or
 [`check_iffbs_exact`](@ref) to run the check deliberately.
 
 If you pass a `target` built with `entry_time` / `survival` / `step_logprob`, they
-must be the SAME ones you gave [`epidemic_loglik`](@ref). See
+must be the same ones you gave [`epidemic_loglik`](@ref). See
 [`epidemic_conditional_loglik`](@ref).
 """
 function iffbs_mh!(model, data::EpidemicData, X, rng;
@@ -328,8 +313,8 @@ end
 # The exactness argument in `check_iffbs_exact` rests on the focal-self-contribution
 # machinery reproducing "aggregates including i" inside the filter (see
 # `_call_rate_with_focal`). With it switched off, the user's rate functions do
-# their own accounting against LEAVE-ONE-OUT aggregates inside the filter, while
-# `epidemic_loglik` calls those same rates against FULL aggregates — and the
+# their own accounting against leave-one-out aggregates inside the filter, while
+# `epidemic_loglik` calls those same rates against full aggregates, and the
 # package has no way to know which of the two the conditional target should use.
 # Rather than guess, refuse.
 function _check_mh_supported(data::EpidemicData)
@@ -356,17 +341,17 @@ individual whose conditional the filter is getting wrong.
 
 Returns a `NamedTuple`:
 
-- `exact::Bool` — `max_abs_logratio <= atol`
+- `exact::Bool`: `max_abs_logratio <= atol`
 - `max_abs_logratio`, `worst_individual`
-- `n_checked` — decisions actually made (proposals that differed from the current
+- `n_checked`, decisions actually made (proposals that differed from the current
   path). A small number means a weak check, so it is reported.
 - `n_identical`
 - `offenders` — `(individual, logratio)` pairs exceeding `atol`, worst first
 
 ## What it can and cannot tell you
 
-It compares the FILTER against the CONDITIONAL TARGET. It does not compare either
-against [`epidemic_loglik`](@ref) — that is the delta-consistency test's job, and
+It compares the filter against the CONDITIONAL target. It does not compare either
+against [`epidemic_loglik`](@ref), that is the delta-consistency test's job, and
 it belongs in your model's own test suite (see `test/iffbs_mh.jl`).
 
 Static detection of "is this spec iFFBS-compatible?" is not possible: rates are
@@ -381,7 +366,7 @@ The filter and the likelihood do not share their numerical guards
 `1 - rowsum`; `epidemic_loglik` adds `1e-12` inside the `log`;
 `make_neighbor_logprob_from_transitions` floors at `1e-12`). On a model whose
 probabilities sit well inside those bands the agreement is ~1e-12 relative, so
-`atol=1e-8` is comfortable. A model that fails ONLY because it rides the clamp has
+`atol=1e-8` is comfortable. A model that fails only because it rides the clamp has
 a different problem worth knowing about.
 """
 function check_iffbs_exact(model, data::EpidemicData, X;

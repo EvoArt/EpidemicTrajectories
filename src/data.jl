@@ -1,5 +1,5 @@
 # The `data` object: everything that isn't the parameters (`model`) or the latent
-# trajectory (`X`) — the fixed structure, the observations, the user's derived
+# trajectory (`X`): the fixed structure, the observations, the user's derived
 # summaries, and the user's aggregates container.
 
 """
@@ -11,30 +11,30 @@ Holds a model's fixed structure and the user's tracked state. Built by
 
 Fields:
 - `n_individuals`, `n_timepoints`, `n_states`
-- `state_space` — state names; state `k` in `X` means `state_space[k]`
+- `state_space`, state names; state `k` in `X` means `state_space[k]`
 - `group`, `members_by_group` — group membership, for the fixed-group convenience
   path. Nothing in the package requires groups to be fixed, or to exist at all:
   the coupling structure is `affected_individuals`, and a model with time-varying
   membership indexes its own structure off `data` however it likes.
-- `sampling_period` — `(first, last)` timepoint per individual
-- `trans_mat` — the [`TransitionSpec`](@ref)
-- `starting_state` — `(model, data, X, i, t) -> probability vector` at the
+- `sampling_period`: `(first, last)` timepoint per individual
+- `trans_mat`, the [`TransitionSpec`](@ref)
+- `starting_state`: `(model, data, X, i, t) -> probability vector` at the
   individual's first timepoint
-- `observation_process` — `(model, data, X, i, t) -> per-state weight vector`
+- `observation_process`: `(model, data, X, i, t) -> per-state weight vector`
 - `derived_summaries` — the user's reversible aggregate updates
-- `rest_contribution` — the coupling term (see [`make_rest_contribution`](@ref))
-- `neighbor_logprob`, `coupled_mask` — the pieces the default coupling term is
+- `rest_contribution`: the coupling term (see [`make_rest_contribution`](@ref))
+- `neighbor_logprob`, `coupled_mask`, the pieces the default coupling term is
   built from, kept so the MH conditional target can reuse them verbatim
-- `affected_individuals` — who each individual's state affects, indexed `[t, i]`,
+- `affected_individuals`, who each individual's state affects, indexed `[t, i]`,
   so it may vary over time
-- `extras` — anything else the user's own functions need (covariates, test
+- `extras`: anything else the user's own functions need (covariates, test
   matrices, capture histories, ...). The package never looks inside.
 - `aggregates` — the user's arrays. The package attaches no meaning to these.
 
 `extras` and `aggregates` are `NamedTuple`s, and `EpidemicData` is parameterised
 on their types. This matters for speed rather than style: a rate function reads
 `data.age[i, t]` on every one of millions of evaluations, and a `Dict{Symbol,Any}`
-would return `Any` — so the arithmetic on top of it would dispatch at runtime and
+would return `Any`: so the arithmetic on top of it would dispatch at runtime and
 box, which measured ~18x slower with ~500k allocations per 20k evaluations. With a
 NamedTuple the element type is known, and the same code allocates nothing. It costs
 the user nothing: they still put whatever they like in, and the package still never
@@ -47,7 +47,7 @@ data.derived_summaries` (the iFFBS sweep, the simulator, and the coupling term i
 `make_rest_contribution`) through runtime dispatch on every call. Confirmed via
 profiling: this alone accounted for the bulk of a ~6x gap between the badger
 model's iFFBS sweep and its reference-implementation counterpart, matching the
-same pattern found earlier for `trans_mat` — see the devlog/repro log for both.
+same pattern found earlier for `trans_mat`: see the devlog/repro log for both.
 """
 struct EpidemicData{SS,OP,OW,RC,NL,EX<:NamedTuple,AG<:NamedTuple,RF<:Tuple,CP,DS<:Tuple}
     n_individuals::Int
@@ -57,18 +57,18 @@ struct EpidemicData{SS,OP,OW,RC,NL,EX<:NamedTuple,AG<:NamedTuple,RF<:Tuple,CP,DS
     group::Vector{Int}
     members_by_group::Dict{Int,Vector{Int}}
     sampling_period::Vector{Tuple{Int,Int}}
-    # BOTH of `TransitionSpec`'s parameters must be bound here. `TransitionSpec`
+    # both of `TransitionSpec`'s parameters must be bound here. `TransitionSpec`
     # gained a second parameter (`C`, the survival-free coupling view) when the
     # coupling fix landed; leaving this as `TransitionSpec{RF}` makes it a UnionAll
-    # — an ABSTRACT field — so every `data.trans_mat` read boxes and dispatches at
+    # and so an abstract field, so every `data.trans_mat` read boxes and dispatches at
     # runtime. That field is the hub of the package (`transition_matrix_at!`,
     # `transition_prob`, for every individual at every timepoint), so an abstract
     # type here is the single most expensive instability the struct can have.
     trans_mat::TransitionSpec{RF,CP}
     starting_state::SS
     # The observation model comes in two shapes. `observation_process` returns the
-    # whole per-state weight VECTOR (what the filter needs); `observation_weight`
-    # returns ONE state's weight as a SCALAR (what the likelihood needs, allocation-
+    # whole per-state weight vector (what the filter needs); `observation_weight`
+    # returns one state's weight as a scalar (what the likelihood needs, allocation-
     # free). A user may supply either or both — see `epidemic_data`. When only the
     # scalar is given the package derives the vector from it for the filter; when
     # only the vector is given, `observation_weight` is `nothing` here.
@@ -81,20 +81,20 @@ struct EpidemicData{SS,OP,OW,RC,NL,EX<:NamedTuple,AG<:NamedTuple,RF<:Tuple,CP,DS
     # target and the forward filter share one definition of the coupling rather
     # than two constructors that happen to agree.
     #
-    # `neighbor_logprob` is derived from the TARGET `trans_mat` (or its survival-
-    # free `coupling` view), NOT from a `coupling_trans_mat` override — see
+    # `neighbor_logprob` is derived from the target `trans_mat` (or its survival-
+    # free `coupling` view), not from a `coupling_trans_mat` override, see
     # `epidemic_data` for why that asymmetry is deliberate.
     #
     # `NL` is parameterised for the usual reason (a bare `Function` field would
     # dispatch at runtime on every neighbour visit). `coupled_mask` is a small
-    # `Union` with `nothing`, matching `affected_individuals` — cheap, and the
+    # `Union` with `nothing`, matching `affected_individuals`, cheap, and the
     # branch on it is hoisted out of the inner loop.
     neighbor_logprob::NL
     coupled_mask::Union{Nothing,Matrix{Bool}}
     affected_individuals::Union{Nothing,Matrix{Vector{Int}}}
     # `_focal` names the individual currently being resampled (or -1), so a rate
     # evaluated inside that individual's own forward filter can transiently re-add
-    # its own contribution and see the RIGHT denominator — see
+    # its own contribution and see the right denominator, see
     # `_call_rate_with_focal` (transitions.jl). `focal_self_contribution` gates
     # that machinery: leave it `true` unless your rate functions already do the
     # focal's own accounting themselves (see `epidemic_data`'s docstring).
@@ -109,8 +109,8 @@ end
 # package knowing any of them exist.
 #
 # The `Val(s)` dispatch is not decoration. The obvious spelling —
-# `s in fieldnames(EpidemicData) ? getfield(d, s) : ...` — is a runtime search over
-# a tuple of symbols on EVERY property access, and it allocates: measured 620x
+# `s in fieldnames(EpidemicData) ? getfield(d, s) : ...`: is a runtime search over
+# a tuple of symbols on every property access, and it allocates: measured 620x
 # slower than this version (11.7 ms / 20k allocations vs 18.9 µs / 0) on nothing
 # but repeated `data.age[i, t]`. Dispatching on `Val` decides the branch at compile
 # time, so the whole accessor disappears.
@@ -191,36 +191,36 @@ Build the [`EpidemicData`](@ref) for a model.
 
 - `trans_mat`: a [`TransitionSpec`](@ref) from [`@transitions`](@ref).
 - `coupling_trans_mat`: the [`TransitionSpec`](@ref) used for the COUPLING term
-  only — how likely a neighbour's realised move was, summed over the focal's
+  only: how likely a neighbour's realised move was, summed over the focal's
   candidate states (see [`make_rest_contribution`](@ref)). Defaults to
   `trans_mat`, which is almost always what you want. Supply a different one only
-  to give the coupling a cheaper equivalent of a rate — see the worked example in
+  to give the coupling a cheaper equivalent of a rate, see the worked example in
   its own section below, and read the warning there first.
 - `starting_state`: `(model, data, X, i, t) -> probability vector` over states at
   the individual's first timepoint.
-- `aggregates`: normally an [`@aggregate`](@ref) declaration — the package
+- `aggregates`: normally an [`@aggregate`](@ref) declaration: the package
   allocates the arrays and takes the reversible updates from it.
-- `observation_process`: `(model, data, X, i, t) -> per-state weight VECTOR`, the
+- `observation_process`: `(model, data, X, i, t) -> per-state weight vector`, the
   likelihood of individual `i`'s observations at `t` under each state. The package
-  has no idea what you observe — supply this (or `observation_weight`) for any
+  has no idea what you observe: supply this (or `observation_weight`) for any
   model with data.
-- `observation_weight`: `(model, data, X, i, t, s) -> the SCALAR weight for state
+- `observation_weight`: `(model, data, X, i, t, s) -> the scalar weight for state
   `s`` — the same information as `observation_process`, one state at a time. **This
   is the recommended form for performance**: the likelihood needs only the one
   entry `w[X[t,i]]`, so the scalar avoids allocating a whole weight vector per
   `(i, t)` under AD (on the badger model, ~187k arrays of Duals and 18 MB per
-  gradient call — see [`epidemic_obs_loglik`](@ref)). You may supply **either or
+  gradient call, see [`epidemic_obs_loglik`](@ref)). You may supply **either or
   both**:
-    * only `observation_weight` — the package derives the filter's vector from it
+    * only `observation_weight`, the package derives the filter's vector from it
       by looping over states (that vector is built only inside the never-
       differentiated filter, so it costs nothing on the gradient), and
       [`epidemic_obs_loglik`](@ref)`(data)` picks up the fast scalar automatically;
-    * only `observation_process` — works unchanged, but the likelihood indexes the
+    * only `observation_process`: works unchanged, but the likelihood indexes the
       vector (correct, just allocates);
-    * both — used exactly as given. Needed when the likelihood's factor is not a
+    * both, used exactly as given. Needed when the likelihood's factor is not a
       plain restriction of the filter's vector (e.g. the badger model, whose filter
       sees `capture × tests` but whose likelihood scores only the `tests` factor,
-      capture being conjugate). When both are set they MUST agree entry-for-entry.
+      capture being conjugate). When both are set they must agree entry-for-entry.
   Defaults to [`no_observations`](@ref) when neither is given.
 - `sampling_period`: `(first, last)` timepoint per individual. Defaults to
   `(1, n_timepoints)` for everyone.
@@ -228,7 +228,7 @@ Build the [`EpidemicData`](@ref) for a model.
   so it may vary over time. Defaults to groupmates under a fixed `group` (see
   [`build_affected_individuals_from_groups`](@ref)). Pass your own for a network,
   spatial, or time-varying-membership model.
-- `coupled_transitions`: WHICH of a neighbour's transitions this individual can
+- `coupled_transitions`: which of a neighbour's transitions this individual can
   influence, e.g. `[(:S, :E)]` when the only effect one individual has on another
   is contributing to its force of infection. Purely an optimisation, and often a
   large one: a neighbour whose realised move is not in this list has the same
@@ -240,22 +240,22 @@ Build the [`EpidemicData`](@ref) for a model.
   entirely if your model has no fixed groups.
 - `state_space`: state names, in the order that fixes their encoding in `X`.
   Defaults to the transitions' own state list.
-- `rest_contribution`: power users only — replaces the whole coupling term, not
+- `rest_contribution`: power users only, replaces the whole coupling term, not
   just the rate it evaluates. Defaults to `nothing`, meaning
   [`make_rest_contribution`](@ref)'s brute-force counterfactual loop. See its own
   section further down before using this.
 - `focal_self_contribution`: default `true`. While the iFFBS filter resamples an
   individual, that individual is reversed out of the aggregates (leave-one-out).
-  A rate the filter evaluates for the focal's OWN move (e.g. a frequency-dependent
+  A rate the filter evaluates for the focal's own move (e.g. a frequency-dependent
   force of infection reading a per-group alive/infected count) would then see a
-  denominator missing the focal itself — `M-1` instead of `M`. With this `true`
+  denominator missing the focal itself: `M-1` instead of `M`. With this `true`
   the package re-adds the focal transiently around each such rate call so it sees
-  the right denominator (the reference's `M+1`), then reverses it — user rate
-  functions need no change. Set it `false` ONLY if your rate functions already do
+  the right denominator (the reference's `M+1`), then reverses it: user rate
+  functions need no change. Set it `false` only if your rate functions already do
   the focal's own accounting themselves (an explicit `+1`/`M+1` term); doing so
-  skips the re-insertion machinery (a per-focal-rate `apply_summaries!` pair — see
+  skips the re-insertion machinery (a per-focal-rate `apply_summaries!` pair, see
   the performance note on [`iffbs!`](@ref)), and the package prints a warning
-  because results are WRONG if that assumption does not hold.
+  because results are wrong if that assumption does not hold.
 - `derived_summaries`: only needed with the verbose fallback (see below).
 - `extras...`: anything else your functions need — covariates, test matrices,
   capture histories, time-varying group membership. Reachable as `data.name`. The
@@ -265,7 +265,7 @@ Build the [`EpidemicData`](@ref) for a model.
 `aggregates` as a plain `Dict{Symbol,Any}` of your own arrays and
 `derived_summaries` as a collection of functions
 `(model, data, X, s, i, t, reverse=false)` that honour `reverse` themselves (it is
-passed POSITIONALLY, so accept it as a positional arg, not a keyword) — a
+passed POSITIONALLY, so accept it as a positional arg, not a keyword): a
 `Tuple` is preferred (each summary keeps its own concrete type all the way
 through, same reasoning as `TransitionSpec`'s `rate_fns`), but any iterable
 works: it is converted with `Tuple(...)`.
@@ -278,13 +278,13 @@ your bottleneck). The three consumers of the rates are not equal:
 
 | consumer | spec used | differentiated? |
 |---|---|---|
-| [`epidemic_loglik`](@ref) | `trans_mat` | **yes** — this is the HMC/NUTS gradient |
+| [`epidemic_loglik`](@ref) | `trans_mat` | **yes**: this is the HMC/NUTS gradient |
 | [`forward_filter`](@ref) (iFFBS) | `trans_mat` | no |
 | the coupling term ([`make_rest_contribution`](@ref)) | `coupling_trans_mat` | no |
 
 The coupling term evaluates a rate `n_states × |affected_individuals|` times per
-`(i, t)` — by far the most rate calls in a sweep — and it is never differentiated.
-So it is the one place where a rate that CACHES a parameter-dependent quantity is
+`(i, t)`: by far the most rate calls in a sweep, and it is never differentiated.
+So it is the one place where a rate that caches a parameter-dependent quantity is
 both worthwhile and safe. Give it a spec whose rates read a value your derived
 summaries maintain, and leave `trans_mat` computing that value honestly:
 
@@ -300,12 +300,12 @@ epidemic_data(;
 
 !!! warning "Never give a cached rate to `trans_mat`"
     `trans_mat` is differentiated. A rate that returns a cached `Float64` computed
-    from the parameters *outside* the AD call is a CONSTANT to the AD backend, so
+    from the parameters *outside* the AD call is a constant to the AD backend, so
     the gradient with respect to whatever fed that cache silently collapses to the
     prior's gradient — while the log-density stays bit-identical, so nothing warns
     you and the fit simply never moves those parameters. `coupling_trans_mat` is
     safe from this by construction: the gradient never reaches it. Aggregates that
-    are pure functions of `X` (counts, say) are fine in `trans_mat` — they are
+    are pure functions of `X` (counts, say) are fine in `trans_mat`: they are
     genuinely constant with respect to the parameters. It is caching a
     *parameter-derived* quantity that breaks.
 
@@ -313,18 +313,18 @@ The two specs must agree mathematically; the package cannot check that for you
 (and does not try), it only takes the two you hand it.
 
 **A custom `rest_contribution`** (power users; skip unless the coupling term is
-your bottleneck — check with a profiler first). [`make_rest_contribution`](@ref)'s
+your bottleneck: check with a profiler first). [`make_rest_contribution`](@ref)'s
 default is brute force: for each of `i`'s `n_states` candidate states, apply it,
 loop over every one of `i`'s `affected_individuals`, ask `coupling_trans_mat` how
 likely each neighbour's realised move is, then undo it. That is exact and assumes
-nothing about your model — which is also why it is `O(n_states × |affected|)` per
+nothing about your model, which is also why it is `O(n_states × |affected|)` per
 `(i, t)`, and on a model with dense coupling (many affected neighbours per
 individual) it dominates the sweep.
 
 A model whose coupling factors through a per-group (or otherwise low-cardinality)
-running total can often do this in `O(n_states)` instead — no loop over neighbours
+running total can often do this in `O(n_states)` instead, no loop over neighbours
 at all — by maintaining the total as a reversible aggregate (same mechanism as any
-other) and reading it directly. Pass your own function with the SAME signature
+other) and reading it directly. Pass your own function with the same signature
 `make_rest_contribution` builds:
 
 ```julia
@@ -334,17 +334,17 @@ other) and reading it directly. Pass your own function with the SAME signature
 Contract to honor, all three matter:
 - Element `s` of the returned vector is (proportional to) the probability of
   everything `i` affects at time `t`, GIVEN `i` is in state `s` at `t`. It need
-  not be normalised — [`forward_filter`](@ref) normalises the product it appears
-  in — but the SAME normalisation (or none) must be used for every `s`.
+  not be normalised, [`forward_filter`](@ref) normalises the product it appears
+  in, but the same normalisation (or none) must be used for every `s`.
 - At `t == data.n_timepoints` there is no `t -> t+1` move to be informative about;
   return a vector of ones (or anything constant across `s`).
-- The function may read `X`/`data.aggregates` but must leave them EXACTLY as it
-  found them on return — `forward_filter` calls this once per timepoint in a
+- The function may read `X`/`data.aggregates` but must leave them exactly as it
+  found them on return: `forward_filter` calls this once per timepoint in a
   window, back to back, and relies on it being side-effect-free from the outside.
 
 Sketch, for a model where the coupling is entirely through a per-`(group,time)`
 force of infection (the badger model's shape): maintain
-`logProbRestTotal[s, t]` — the sum, over ALL individuals, of "how likely was this
+`logProbRestTotal[s, t]`, the sum, over all individuals, of "how likely was this
 individual's realised move if the group's FOI corresponded to candidate state
 `s`" — as a derived summary, patched incrementally the same way `i`'s aggregate
 contribution already is (reverse `i`'s row, recompute it, add it back). Then
@@ -359,11 +359,11 @@ end
 
 turns the neighbour loop into an array subtraction: `O(n_states)`, independent of
 `|affected|`. The work moves from every `forward_filter` call into maintaining
-`logProbRestRow`/`logProbRestTotal` as reversible aggregates — cheaper because
-each individual's row changes only when ITS OWN trajectory changes, not every
+`logProbRestRow`/`logProbRestTotal` as reversible aggregates, cheaper because
+each individual's row changes only when ITS own trajectory changes, not every
 time a neighbour's does. This is the reference implementation's own design
 (`logProbRest`/`logProbRestTotal`, incrementally patched); porting it is exactly
-this — a `rest_contribution` the package knows nothing about beyond its
+this: a `rest_contribution` the package knows nothing about beyond its
 signature, backed by aggregates the package equally knows nothing about.
 """
 function epidemic_data(; n_individuals, n_timepoints, trans_mat,
@@ -417,15 +417,15 @@ function epidemic_data(; n_individuals, n_timepoints, trans_mat,
     end
 
     # Which of a neighbour's moves this individual can influence. Declaring it is
-    # a pure optimisation — see `coupled_transition_mask`.
+    # a pure optimisation: see `coupled_transition_mask`.
     coupled_mask = coupled_transitions === nothing ? nothing :
         coupled_transition_mask(state_space, coupled_transitions)
 
     affected_ids = (data, t, i) -> affected_individuals[t, i]
     # Which spec the coupling scores neighbours against. Resolution, in order:
-    #   1. an explicit `coupling_trans_mat` the user passed — always wins;
+    #   1. an explicit `coupling_trans_mat` the user passed, always wins;
     #   2. else `trans_mat`'s survival-free `coupling` view, if `@survival` built one
-    #      — this is what keeps a neighbour's own survival OUT of the coupling, so a
+    #      — this is what keeps a neighbour's own survival out of the coupling, so a
     #      small survival cannot annihilate the infection signal (see TransitionSpec);
     #   3. else `trans_mat` itself (no survival, so nothing to strip).
     # The coupling term is the only rate consumer that is never differentiated, so it
@@ -435,8 +435,8 @@ function epidemic_data(; n_individuals, n_timepoints, trans_mat,
     filter_neighbor_logprob = make_neighbor_logprob_from_transitions(coupling_spec)
 
     # The neighbour scorer stored on `data`, and hence the one
-    # `epidemic_conditional_loglik` defaults to, is derived from `trans_mat` — the
-    # TARGET — and deliberately ignores any `coupling_trans_mat` override.
+    # `epidemic_conditional_loglik` defaults to, is derived from `trans_mat`: the
+    # target, and deliberately ignores any `coupling_trans_mat` override.
     #
     # That asymmetry is the whole point. `coupling_trans_mat` is sold as a safe
     # optimisation on the grounds that its cached rates equal the true ones; when
@@ -446,19 +446,19 @@ function epidemic_data(; n_individuals, n_timepoints, trans_mat,
     # make the check compare the approximation against itself, which is exactly the
     # silent failure it exists to catch.
     #
-    # It still uses the survival-free `coupling` VIEW when `@survival` built one.
+    # It still uses the survival-free `coupling` view when `@survival` built one.
     # That is not an approximation: a neighbour's own survival factor does not
     # depend on the focal, so it contributes the same constant to every candidate
     # and cancels in both the filter's normalisation and the MH ratio's difference.
     # Scoring through the survival-scaled probability instead risks it underflowing
-    # to the 1e-12 floor, at which point the constant stops being constant — the
+    # to the 1e-12 floor, at which point the constant stops being constant, the
     # coupling-annihilation bug the `coupling` view was introduced to fix.
     target_neighbor_logprob = trans_mat.coupling !== nothing ?
         make_neighbor_logprob_from_transitions(trans_mat.coupling) :
         make_neighbor_logprob_from_transitions(trans_mat)
     neighbor_logprob = target_neighbor_logprob
-    # `make_rest_contribution`'s brute-force counterfactual loop is the DEFAULT,
-    # not the only option — a motivated user who knows their coupling structure
+    # `make_rest_contribution`'s brute-force counterfactual loop is the default,
+    # not the only option: a motivated user who knows their coupling structure
     # (e.g. it factors through a per-group running total, as the reference
     # implementation's does) can supply their own `rest_contribution` of the same
     # signature and skip the O(n_states × |affected|) recompute entirely. See this
@@ -468,7 +468,7 @@ function epidemic_data(; n_individuals, n_timepoints, trans_mat,
                                 neighbor_logprob=filter_neighbor_logprob,
                                 coupled_mask=coupled_mask)
 
-    # Resolve the observation model. A user may give the per-state weight VECTOR
+    # Resolve the observation model. A user may give the per-state weight vector
     # (`observation_process`), the scalar single-state weight (`observation_weight`),
     # or both. The filter needs a vector; the likelihood wants the scalar. So:
     #   * only the scalar given  -> derive the vector for the filter by looping the
@@ -476,7 +476,7 @@ function epidemic_data(; n_individuals, n_timepoints, trans_mat,
     #     never differentiated, so its allocation is harmless — and the fast scalar
     #     still reaches the likelihood via `epidemic_obs_loglik(data)`);
     #   * only the vector given  -> unchanged behaviour (scalar stays `nothing`, the
-    #     likelihood falls back to indexing the vector — correct, just allocates);
+    #     likelihood falls back to indexing the vector, correct, just allocates);
     #   * both given             -> used exactly as supplied (the badger split, where
     #     the likelihood's factor is not a plain restriction of the filter's vector);
     #   * neither                -> `no_observations` (the honest default).
@@ -495,7 +495,7 @@ function epidemic_data(; n_individuals, n_timepoints, trans_mat,
     focal_self_contribution || @warn(
         "epidemic_data: `focal_self_contribution=false` — the package will NOT " *
         "re-add the focal individual to its own transition-rate aggregates during " *
-        "the iFFBS filter. Results are WRONG unless your rate functions account " *
+        "the iFFBS filter. Results are wrong unless your rate functions account " *
         "for the focal's own contribution themselves (e.g. an explicit `+1`/`M+1` " *
         "in the force of infection). Only set this if you have supplied such rates.")
 

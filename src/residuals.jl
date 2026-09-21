@@ -1,48 +1,16 @@
-# Trajectory summaries: post-hoc, per-individual, per-draw quantities computed
-# from a SAMPLED trajectory `X` — residuals for diagnosing misspecification, and
-# derived epidemiological quantities that share the same computational shape.
+# Post-hoc, per-individual, per-draw quantities computed from a sampled `X`:
+# residuals for diagnosing misspecification, plus derived epidemiological
+# quantities of the same computational shape.
 #
-# This is the FOURTH artefact generated from one model spec, alongside the
-# simulator, the likelihood and the latent sampler. The first three say what the
-# model IS; this one says whether the fit was any good.
+# `accumulate` has no default. The discrete and continuous accumulators agree
+# only when `p_s = 1 - exp(-lambda_s)` exactly, and diverge precisely at large
+# per-step hazard, which is the regime a residual exists to report on. Omitting
+# it is an error rather than a silent pick between two answers that differ
+# where it matters most.
 #
-# ## The central design rule applies here too
-#
-# The package never assumes what a residual measures. Two waiting-time residuals
-# differ on three axes that the transition spec does NOT determine:
-#
-#   * the ACCUMULATOR   — `1 - ∏(1-p_s)` (discrete per-step probabilities) or
-#                         `1 - exp(-Σλ_s)` (continuous cumulative hazard);
-#   * the CLOCK ORIGIN  — read from `X` (time of entry to a state), from the
-#                         sampling window, or from the user's own `data` (a birth
-#                         time the trajectory knows nothing about);
-#   * the CONDITIONING  — none, or left-truncated by a normaliser.
-#
-# The two accumulators agree ONLY when `p_s = 1 - exp(-λ_s)` exactly, and diverge
-# precisely at large per-step hazard — which is the regime a residual exists to
-# report on. So `accumulate` has NO DEFAULT: omitting it is an error, never a
-# silent choice between two answers that differ where it matters most.
-#
-# What the package CAN derive from the spec is the event-extraction and censoring
-# skeleton (scan `X` for the entry to a state, for a competing risk, for the
-# window end) and the per-step hazard (`transition_prob`). That is what
-# `WaitingTimeResidual` supplies. Everything else is declared.
-#
-# ## Not reversible, and deliberately so
-#
-# `@residual` looks superficially like `@aggregate` and must NOT be built like it.
-# Aggregates need reversible forward/reverse updates because they are maintained
-# INCREMENTALLY inside iFFBS, under an invariant that they always agree with `X`.
-# A summary is computed ONCE per draw, read-only, on a COMPLETE `X`. There is no
-# invariant to preserve and nothing to reverse; copying that machinery would
-# double the surface area and buy nothing.
-#
-# ## Never on the AD path
-#
-# Summaries consume `Int` states and return `Float64`, computed on a sampled `X`
-# outside every gradient call. They are post-hoc by default, so the fit's hot loop
-# is untouched: residuals cost exactly zero inside iFFBS and HMC because they do
-# not run there.
+# Unlike aggregates, these are not reversible and do not need to be: a summary
+# is computed once per draw, read-only, on a complete `X`. They consume `Int`
+# states outside every gradient call, so they cost nothing inside iFFBS or HMC.
 
 # =============================================================================
 # Tier 0 — the generic core
@@ -55,16 +23,16 @@ One per-individual, per-draw quantity computed from a sampled trajectory. This i
 the whole contract of the residuals layer; everything else in this file builds one
 of these.
 
-- `name` — a `Symbol`, used to key the result table.
-- `f` — `(model, data, X, i, rng) -> Union{Float64,Missing}`.
-- `kind` — `:pit` for a randomized probability-integral-transform residual (which
+- `name`, a `Symbol`, used to key the result table.
+- `f`, `(model, data, X, i, rng) -> Union{Float64,Missing}`.
+- `kind`, `:pit` for a randomized probability-integral-transform residual (which
   is Uniform(0,1) under a correctly specified model, so the uniformity tests
   apply), `:raw` for anything else (an R_i, a lifetime, a rate ratio). The kind is
   what tells a downstream check whether "is this uniform?" is even a meaningful
   question to ask of the column.
 
 **`missing` is a first-class return value**, meaning "this individual does not
-contribute to this summary" — it was never in the origin state, its window is
+contribute to this summary": it was never in the origin state, its window is
 empty, a normaliser underflowed. The reference implementation expresses the same
 thing with a bare `continue`, which makes it invisible; returning `missing`
 explicitly is what lets [`trajectory_summaries`](@ref) report COVERAGE. A change
@@ -88,7 +56,7 @@ Draw a randomized probability-integral-transform residual uniformly on `[lb, ub]
 
 Discrete time makes the exact PIT unusable: an event observed at step `L` tells us
 only that the underlying continuous waiting time fell somewhere in
-`[F(L-1), F(L)]`, so the PIT is an INTERVAL, not a point. Drawing uniformly within
+`[F(L-1), F(L)]`, so the PIT is an interval, not a point. Drawing uniformly within
 it restores exact Uniform(0,1) calibration under a correct model — which is what
 makes the uniformity tests meaningful in the first place.
 
@@ -111,7 +79,7 @@ end
 
 The DISCRETE accumulator: the probability that an event with per-step probability
 `p_s` has happened within `n` steps of `t_start`. Use it when the model's rates
-are genuinely per-step probabilities — which is what [`@transitions`](@ref) rates
+are genuinely per-step probabilities, which is what [`@transitions`](@ref) rates
 are.
 
 Returns `0.0` for `n <= 0` (no steps, no chance of the event).
@@ -139,7 +107,7 @@ probabilities. Use it when the quantity being summed is a force of infection.
 
 !!! warning "This is not interchangeable with `discrete_product_cdf`"
     The two agree only when `p_s = 1 - exp(-λ_s)` exactly, and they diverge as the
-    per-step value grows — which is exactly the regime where the residual is
+    per-step value grows, which is exactly the regime where the residual is
     trying to tell you something. Picking the wrong one gives a plausible,
     silently miscalibrated number. This is why `accumulate` has no default.
 """
@@ -163,7 +131,7 @@ end
 const _ACCUMULATORS = (:discrete_product, :cumulative_hazard)
 
 # =============================================================================
-# Event extraction — the skeleton the spec CAN derive
+# Event extraction: the skeleton the spec can derive
 # =============================================================================
 
 """
@@ -174,7 +142,7 @@ The first time in `t_from:t_to` at which individual `i` is in `state`, or
 
 This is the clock-origin scanner: "when did this individual enter E?" is a
 question about `X` alone, so the package can answer it without knowing what E
-means. `state` is an integer state code — see [`state_code`](@ref) to get one from
+means. `state` is an integer state code: see [`state_code`](@ref) to get one from
 a name. The range is clipped to `X`'s bounds, so an out-of-range window is empty
 rather than an error.
 """
@@ -196,7 +164,7 @@ state_code(data::EpidemicData, s::Integer) = Int(s)
 state_code(data::EpidemicData, s::Symbol) = _state_index(data, s)
 
 # =============================================================================
-# The hazard seam — where the model spec earns its keep
+# The hazard seam, where the model spec earns its keep
 # =============================================================================
 
 """
@@ -208,7 +176,7 @@ Build `hazard(model, data, X, i, t) -> Float64`, the per-step probability of the
 This is the whole reason residuals belong in this package rather than in a script.
 The reference implementation hand-rolls a `progression_probability` with a
 `hasproperty(data, :likelihood_progression_fn)` fallback chain and probes for user
-functions with `Base.applicable`/`@isdefined` at run time — duck-typed
+functions with `Base.applicable`/`@isdefined` at run time, duck-typed
 rediscovery of a spec that `@transitions` has already declared. All of it collapses
 to [`transition_prob`](@ref).
 
@@ -225,9 +193,9 @@ wrong distribution.
 `TransitionSpec.coupling` is the survival-free view, stashed by `@survival` for
 exactly this shape of need. So:
 
-- `:coupling` (default) — the survival-free view when there is one, else
+- `:coupling` (default): the survival-free view when there is one, else
   `trans_mat` (which IS survival-free when there is no `@survival`).
-- `:full` — `data.trans_mat` as-is, survival folded in. Correct when the event of
+- `:full`: `data.trans_mat` as-is, survival folded in. Correct when the event of
   interest IS the survival-scaled move, e.g. a residual for `* -> D`.
 
 Pass a [`TransitionSpec`](@ref) directly to use one the package did not choose.
@@ -248,7 +216,7 @@ function _resolve_spec(data::EpidemicData, spec::Symbol)
 end
 
 # =============================================================================
-# Tier 1 — auto-derived skeleton, DECLARED accumulator
+# Tier 1 — auto-derived skeleton, declared accumulator
 # =============================================================================
 
 """
@@ -260,7 +228,7 @@ A randomized-PIT residual for the waiting time between entering state `from` and
 moving to state `to`, with the event scan and censoring derived from `X` and the
 per-step hazard derived from the model spec.
 
-`accumulate` is REQUIRED — `:discrete_product` or `:cumulative_hazard`. There is
+`accumulate` is REQUIRED, `:discrete_product` or `:cumulative_hazard`. There is
 no default and there must never be one: the two agree only when
 `p_s = 1 - exp(-λ_s)` exactly, and diverge precisely where the residual carries
 information. See [`discrete_product_cdf`](@ref).
@@ -268,45 +236,45 @@ information. See [`discrete_product_cdf`](@ref).
 ## What is derived, and what you must declare
 
 Derived from `X` and the spec:
-- the clock origin, when it is `:entry_to_from_state` — scan `X` for `i`'s first
+- the clock origin, when it is `:entry_to_from_state`: scan `X` for `i`'s first
   time in `from` within its window;
-- the event time — `i`'s first time in `to` at or after the origin;
-- the censoring time — the earliest of the declared `censor_at` events;
+- the event time, `i`'s first time in `to` at or after the origin;
+- the censoring time, the earliest of the declared `censor_at` events;
 - the per-step hazard — [`transition_hazard`](@ref) on the `from => to` pair.
 
 Declared by you, because the spec cannot know them:
 - `accumulate` (no default, see above);
-- `origin` — `:entry_to_from_state` (from `X`) or `:window_start` (the
+- `origin`: `:entry_to_from_state` (from `X`) or `:window_start` (the
   individual's own `sampling_period` start). An exposure-time residual wants the
   latter: its clock starts when observation starts, not when the individual
   entered `S`, since it was already susceptible when we began watching.
-- `censor_at` — a tuple naming what ends observation. `:window_end` is the
-  individual's own `sampling_period` end; any other symbol is read as a STATE
+- `censor_at`: a tuple naming what ends observation. `:window_end` is the
+  individual's own `sampling_period` end; any other symbol is read as a state
   (typically the death state, a competing risk), censoring at the last step before
   the individual entered it. The earliest applicable one wins.
 
 ## Censoring, and why a competing risk is censored rather than dropped
 
 An individual that dies before making the `from -> to` move has not falsified the
-model — it simply stopped being observable. Dropping it biases the residual
+model: it simply stopped being observable. Dropping it biases the residual
 towards individuals who lived long enough to progress. So a competing risk enters
 as a right-censoring time, giving `[F(c), 1]`, exactly as running off the end of
 the window does.
 
 ## Other keywords
 
-- `name` — the result key. Defaults to `Symbol(from, :_to_, to)`.
+- `name`: the result key. Defaults to `Symbol(from, :_to_, to)`.
 - `hazard` — supply your own `(model, data, X, i, t) -> Float64` to override the
   spec-derived one. For a semi-Markov model whose progression hazard depends on
   time since infection, this is the seam.
-- `spec` — which transition view the hazard comes from; see
+- `spec`, which transition view the hazard comes from; see
   [`transition_hazard`](@ref). The default is the survival-free one.
-- `window` — `:sampling_period` (default) or an explicit `(first, last)` applied
+- `window`: `:sampling_period` (default) or an explicit `(first, last)` applied
   to everyone.
-- `require_start_state` — if given, individuals not in this state at their window
+- `require_start_state`, if given, individuals not in this state at their window
   start return `missing`. The reference does this unconditionally (skipping anyone
   not susceptible at `t_start`), which is a modelling choice about who is at risk,
-  not a fact about the transition — so here it is opt-in.
+  not a fact about the transition, so here it is opt-in.
 
 Returns a [`TrajectorySummary`](@ref) of kind `:pit`.
 
@@ -322,7 +290,7 @@ progression = WaitingTimeResidual(:E => :I;
     A survival residual measures from a birth time the trajectory does not know,
     conditioned on being alive at first capture. Those are model-specific facts
     the spec cannot supply. It gets [`LeftTruncatedSurvivalResidual`](@ref), or
-    drops to [`@residual`](@ref) — do NOT stretch this constructor to cover it.
+    drops to [`@residual`](@ref) — do not stretch this constructor to cover it.
     Widening Tier 1 is how a residual comes to be silently wrong.
 """
 function WaitingTimeResidual(pair::Pair;
@@ -393,7 +361,7 @@ function WaitingTimeResidual(pair::Pair;
 
         if t_event !== nothing
             # Event observed at step L after the origin. The underlying continuous
-            # waiting time lies in [F(L-1), F(L)] — an interval, not a point.
+            # waiting time lies in [F(L-1), F(L)]: an interval, not a point.
             L = t_event - t0
             L <= 0 && return missing
             lb = _accumulate_cdf(acc, h, t0, L - 1)
@@ -430,15 +398,15 @@ the CDF must be renormalised by `S(origin -> condition_on)`), and it censors at 
 capture that may fall after the monitoring window. Stretching the waiting-time
 constructor to cover it is exactly how a residual comes to be silently wrong.
 
-- `survival` — `(model, data, i, t) -> P(individual i survives the t -> t+1 step)`.
-  The SAME survival the transitions use.
-- `origin` — `i -> t0`, the clock origin. Typically `i -> data.birth_time[i]`.
-- `condition_on` — `i -> t_c`, a time the individual is KNOWN to have been alive;
+- `survival`: `(model, data, i, t) -> P(individual i survives the t -> t+1 step)`.
+  The same survival the transitions use.
+- `origin`: `i -> t0`, the clock origin. Typically `i -> data.birth_time[i]`.
+- `condition_on`: `i -> t_c`, a time the individual is known to have been alive;
   the CDF is renormalised by `S(t0 -> t_c)`. Typically first capture.
 - `censor_at` — `i -> t_censor` for an individual that does not die within the
   trajectory. Typically the last capture, which may fall after monitoring ends.
-- `death` — the death state, scanned for in `X` (name or index).
-- `name` — the result key.
+- `death`, the death state, scanned for in `X` (name or index).
+- `name`, the result key.
 
 An individual whose normaliser underflows (`S(t0 -> t_c) <= 0`, or non-finite)
 returns `missing` rather than a `NaN`. It carries no information, and letting a
@@ -448,8 +416,8 @@ honestly as a coverage drop.
 Returns a [`TrajectorySummary`](@ref) of kind `:pit`.
 
 !!! note "`condition_on` is a modelling choice, so it is yours to make"
-    The reference conditions on FIRST capture and carries a commented-out
-    alternative conditioning on LAST capture — the question was under active
+    The reference conditions on first capture and carries a commented-out
+    alternative conditioning on LAST capture, the question was under active
     investigation when it was written. First capture is the defensible default (it
     is the earliest time the individual is known alive, so it truncates the least
     and discards the least information), but the package will not choose for you:
@@ -475,7 +443,7 @@ function LeftTruncatedSurvivalResidual(; survival, origin, condition_on, censor_
 
         # Left truncation: we only ever observe individuals that survived to `t_c`,
         # so every probability below is conditional on that. Without this the
-        # residual is calibrated against the WRONG distribution — the unconditional
+        # residual is calibrated against the wrong distribution, the unconditional
         # lifetime — and reports the sampling design as model misfit.
         norm = S(t_c)
         (isfinite(norm) && norm > 0.0) || return missing
@@ -501,27 +469,27 @@ function LeftTruncatedSurvivalResidual(; survival, origin, condition_on, censor_
 end
 
 # =============================================================================
-# Tier 2 — the user's own summary
+# Tier 2, the user's own summary
 # =============================================================================
 
 """
     @residual name(model, data, X, i, rng) = body
     @residual :raw name(model, data, X, i, rng) = body
 
-Declare a [`TrajectorySummary`](@ref) from an expression — the escape hatch for
+Declare a [`TrajectorySummary`](@ref) from an expression: the escape hatch for
 everything the auto-derived constructors cannot know.
 
 The body has `model`, `data`, `X`, `i` and `rng` in scope, and returns a `Float64`
 or `missing`. Anything reachable as `data.name` (the `extras` convention) is
 available, so a user's own birth times, capture histories or covariates need no
-new plumbing. The package supplies the helpers — [`randomized_pit`](@ref),
+new plumbing. The package supplies the helpers, [`randomized_pit`](@ref),
 [`discrete_product_cdf`](@ref), [`cumulative_hazard_cdf`](@ref),
-[`first_entry`](@ref), [`transition_hazard`](@ref) — and calls your function; it
+[`first_entry`](@ref), [`transition_hazard`](@ref), and calls your function; it
 never assumes what your clock or conditioning is. This is exactly the `aggregates`
 posture.
 
 An optional leading `:pit` or `:raw` sets the kind (default `:pit`). Use `:raw`
-for a quantity that is not a PIT residual — an R_i, a lifetime — so the uniformity
+for a quantity that is not a PIT residual — an R_i, a lifetime, so the uniformity
 checks know not to apply.
 
 **Unlike [`@aggregate`](@ref), no reverse is needed.** A summary is computed once
@@ -572,10 +540,10 @@ end
 What [`trajectory_summaries`](@ref) returns: one `n_individuals × n_draws` matrix
 of `Union{Float64,Missing}` per summary, plus the coverage each achieved.
 
-- `result[name]` — the matrix for summary `name`.
-- `result.kinds[name]` — `:pit` or `:raw`.
-- `result.coverage[name]` — the fraction of `(individual, draw)` cells that are
-  NOT `missing`.
+- `result[name]`: the matrix for summary `name`.
+- `result.kinds[name]`, `:pit` or `:raw`.
+- `result.coverage[name]`: the fraction of `(individual, draw)` cells that are
+  not `missing`.
 
 **Coverage is not decoration.** A residual silently applying to half the
 population it should is invisible in the residual values themselves — every one of
@@ -607,7 +575,7 @@ The non-`missing` values of one summary, pooled across individuals and draws.
 This is the form a histogram or a QQ plot wants. For a TEST, use
 [`draw_values`](@ref) instead: residuals from the same individual at different
 draws are correlated, so pooling inflates the effective sample size and makes any
-uniformity test anticonservative — it will reject a correct model.
+uniformity test anticonservative, it will reject a correct model.
 """
 function residual_values(r::SummaryResult, name::Symbol)
     M = r.values[name]
@@ -622,10 +590,10 @@ end
 """
     draw_values(result, name, draw) -> Vector{Float64}
 
-The non-`missing` values of one summary for ONE draw — the per-draw sample a
+The non-`missing` values of one summary for one draw: the per-draw sample a
 uniformity test should be applied to.
 
-Testing per draw and looking at the DISTRIBUTION of p-values across draws is the
+Testing per draw and looking at the distribution of p-values across draws is the
 correct treatment (see `pvalue_distribution` in the `HypothesisTests` extension),
 because within one draw the residuals are one per individual and independent under
 the model, which is what the test assumes.
@@ -653,7 +621,7 @@ end
     trajectory_summaries(summaries, data, draws; rng=Random.default_rng())
 
 Compute every summary over every draw. `draws` is **any iterable of `(model, X)`
-pairs** — an archive of thinned posterior draws, a generator reading them off
+pairs**, an archive of thinned posterior draws, a generator reading them off
 disk, or a single `[(model, X)]` for a one-off check.
 
 Typing it that way is what keeps the package PPL-agnostic: the map-over-draws loop
@@ -666,13 +634,13 @@ residual_values(R, :E_to_I)      # pooled, for a histogram
 draw_values(R, :E_to_I, 1)       # one draw, for a uniformity test
 ```
 
-Pass `summaries` as a `Tuple` — each summary is a distinct closure type, and a
+Pass `summaries` as a `Tuple`: each summary is a distinct closure type, and a
 `Vector{TrajectorySummary}` erases that, putting a runtime dispatch on every one
 of the `m × n_draws × n_summaries` calls. (A `Vector` is accepted and converted,
 but the conversion cannot recover what the container already erased at the point
 it was built.)
 
-## The aggregates are NOT rebuilt per draw
+## The aggregates are not rebuilt per draw
 
 If your rate functions read `data.aggregates`, establish the invariant for each
 draw's `X` yourself before handing it over — the same
@@ -684,7 +652,7 @@ read the aggregates at all, and rebuilding them unconditionally would put an
 
 ## Cost
 
-One `O(m × T)` pass per summary per draw — the same order as a single likelihood
+One `O(m × T)` pass per summary per draw, the same order as a single likelihood
 evaluation, against the thousands of gradient evaluations the fit already spent
 per draw. Post-hoc means the fit's hot loop is untouched entirely: residuals cost
 zero inside iFFBS and HMC because they do not run there.
@@ -733,7 +701,7 @@ end
     return _fill_draw!(values, Base.tail(specs), model, data, X, m, k, rng)
 end
 
-# Split out so the per-individual loop specialises on ONE concrete summary
+# Split out so the per-individual loop specialises on one concrete summary
 # function, rather than on the whole tuple's tail type.
 function _fill_column!(M, f, model, data, X, m, k, rng)
     @inbounds for i in 1:m
@@ -753,7 +721,7 @@ A compact copy of a trajectory for a post-hoc residual archive.
 
 Trajectories are the whole cost of computing residuals after the fact, and that
 cost is storage, not compute. A state space has a handful of states, so `Int8`
-holds one exactly — and on the badger model (2391 individuals × 161 timepoints)
+holds one exactly, and on the badger model (2391 individuals × 161 timepoints)
 that is 385 KB per draw instead of 3.1 MB, i.e. 192 MB for 500 draws instead of
 1.5 GB.
 
@@ -793,12 +761,12 @@ end
     aggregate_synced_draws(data, draws) -> iterator
 
 Wrap a `(model, X)` iterator so that each draw's aggregates are rebuilt before the
-summaries see it — `reset_aggregates!` then [`apply_derived_summaries!`](@ref), the
+summaries see it: `reset_aggregates!` then [`apply_derived_summaries!`](@ref), the
 same invariant the likelihood needs.
 
 Use this when your rate functions read `data.aggregates` (a frequency-dependent
 force of infection reading a per-group infected count, say), because a
-spec-derived hazard then depends on the aggregates agreeing with THIS draw's `X`,
+spec-derived hazard then depends on the aggregates agreeing with this draw's `X`,
 not with whatever `X` was current when the fit ended.
 
 Skip it when they do not: it costs one `O(m × T)` pass per draw, and
@@ -814,17 +782,17 @@ function aggregate_synced_draws(data::EpidemicData, draws)
 end
 
 # =============================================================================
-# ONLINE MODE — compute residuals during the fit, never storing X
+# Online mode: compute residuals during the fit, never storing X
 # =============================================================================
 
 """
     SummaryCollector(summaries, data, n_stored; rng, thin=1)
 
-Collect summaries DURING a fit, storing only the residuals and never the
+Collect summaries during a fit, storing only the residuals and never the
 trajectories.
 
 This is the mode for a model whose `X` cannot be archived. Storage here is
-`m × n_stored` `Float64` per summary — for 2391 individuals and 500 stored draws
+`m × n_stored` `Float64` per summary: for 2391 individuals and 500 stored draws
 that is 9.5 MB per summary, against 192 MB for even an `Int8` archive of the same
 draws and 1.5 GB for the raw `Int` ones. Nothing about `X` is kept.
 
@@ -844,15 +812,15 @@ cost, and they differ only in what they give up (see below).
 
 **What you give up** is the post-hoc iteration loop: inventing a new residual
 later costs a full refit, because the trajectories it would have been computed
-from are gone. That is the whole trade. Decide the diagnostics you want BEFORE the
+from are gone. That is the whole trade. Decide the diagnostics you want before the
 run, or archive to disc instead — [`BatchedArchive`](@ref) keeps the iteration
 loop at a bounded memory cost.
 
-- `n_stored` — how many draws to keep. 500 far exceeds what a uniformity test
+- `n_stored`, how many draws to keep. 500 far exceeds what a uniformity test
   needs.
-- `thin` — compute every `thin`-th call, matching the reference's `iterSub`. Set
+- `thin`, compute every `thin`-th call, matching the reference's `iterSub`. Set
   it to `n_sweeps ÷ n_stored`; the diagnostic does not need every sweep.
-- `rng` — its own stream, so residual randomization never perturbs the sampler's.
+- `rng`, its own stream, so residual randomization never perturbs the sampler's.
 
 Feed it with [`collect_summaries!`](@ref) once per sweep and read the result with
 [`finish`](@ref), which returns the same [`SummaryResult`](@ref) post-hoc gives.
@@ -910,7 +878,7 @@ Offer one sweep's `(model, X)` to a [`SummaryCollector`](@ref). Returns whether
 this call actually stored a draw.
 
 A no-op except on every `thin`-th call, and once `n_stored` draws are in it stops
-entirely — so leaving this in the sweep loop past the end of the schedule costs
+entirely, so leaving this in the sweep loop past the end of the schedule costs
 one integer increment and a comparison.
 
 The trajectory is read and discarded; nothing about it is retained, which is the
@@ -955,7 +923,7 @@ function finish(c::SummaryCollector)
 end
 
 # =============================================================================
-# DISC ARCHIVING — bounded memory, and the post-hoc iteration loop preserved
+# Disc archiving: bounded memory, and the post-hoc iteration loop preserved
 # =============================================================================
 
 """
@@ -964,15 +932,15 @@ end
 Archive trajectories to disc in batches, so neither the fit nor the residual
 computation ever holds more than one batch in memory.
 
-This is the route for a model whose `X` is too big to keep in RAM — at small
+This is the route for a model whose `X` is too big to keep in RAM: at small
 scale (the cattle model, say) just holding the draws is simpler and fine. Batching
-bounds the resident cost at `batch_size × per-draw size` — 19 MB at the default 50
-for the badger model — regardless of how many draws are archived in total, and
+bounds the resident cost at `batch_size × per-draw size`, 19 MB at the default 50
+for the badger model: regardless of how many draws are archived in total, and
 regardless of how many are later read back.
 
 **Why archive at all, rather than [`SummaryCollector`](@ref)?** Because it keeps
 the post-hoc iteration loop. A new diagnostic idea then costs one pass over the
-archive instead of a full refit — which, for work whose stated goal is diagnosing
+archive instead of a full refit: which, for work whose stated goal is diagnosing
 misspecification via residuals, is the loop worth protecting. The collector is
 cheaper in storage; the archive is cheaper in researcher time. Both consume the
 identical [`TrajectorySummary`](@ref), so this is an operational choice, not a
@@ -1030,10 +998,10 @@ Add one draw to a [`BatchedArchive`](@ref), flushing to disc when the batch fill
 Returns the total number of draws archived so far.
 
 `X` is converted to `Int8` here (see [`archive_draw`](@ref)), so the caller's
-matrix is neither retained nor modified — the sampler may go on mutating it in
+matrix is neither retained nor modified: the sampler may go on mutating it in
 place, as iFFBS does.
 
-Thin BEFORE calling this, not inside it: the archive stores what it is given.
+Thin before calling this, not inside it: the archive stores what it is given.
 """
 function archive_push!(a::BatchedArchive, model, X)
     a.closed && error("archive_push!: the archive is closed")
@@ -1062,7 +1030,7 @@ end
 Flush the final partial batch and close a [`BatchedArchive`](@ref).
 
 **Call this.** Without it, up to `batch_size` draws are left sitting in the buffer
-and never written — a silent partial loss at the end of every run. Safe to call
+and never written, a silent partial loss at the end of every run. Safe to call
 more than once.
 """
 function archive_close!(a::BatchedArchive)
@@ -1087,14 +1055,14 @@ Lazily read a [`BatchedArchive`](@ref) back as the `(model, X)` iterator
 [`trajectory_summaries`](@ref) consumes.
 
 **One batch is resident at a time.** The iterator deserialises a batch, yields its
-draws, and drops it before opening the next — so a 10 GB archive is traversable in
+draws, and drops it before opening the next: so a 10 GB archive is traversable in
 `batch_size × 385 KB` of memory. This is what makes post-hoc residuals possible at
 all on a model whose trajectories cannot all be held at once.
 
 Trajectories are widened from `Int8` back to `Int` on the way out; `Int8` is a
 storage format, and this is where it stops being one.
 
-Batches are read in filename order, which is the order they were written — the
+Batches are read in filename order, which is the order they were written: the
 batch index is zero-padded for exactly that reason.
 """
 function archived_draws(dir::AbstractString; prefix::AbstractString="draws")

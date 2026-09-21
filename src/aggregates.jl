@@ -1,25 +1,13 @@
-# User-declared aggregates and their REVERSIBLE updates.
+# User-declared aggregates and their reversible updates.
 #
-# This file is where the package's central design rule lives: it never assumes
-# what arrays (if any) the user wants tracked, or what they mean. The user
-# declares whatever arrays they like and, for each, an update that can be run
-# FORWARDS or IN REVERSE. The package only ever allocates the storage and calls
-# the user's functions.
+# The package never assumes what arrays the user wants tracked or what they
+# mean. It allocates the storage and calls the user's functions, which must run
+# forwards or in reverse.
 #
-# Reversibility is what makes the latent sampler both correct and cheap. To
-# resample individual `i`, iFFBS reverses `i`'s own contribution out of the
-# aggregates, runs the forward filter / backward sample (so `i` sees leave-one-out
-# statistics — the counts exclude itself), then re-applies `i`'s new contribution.
-# The aggregates therefore stay exactly consistent with `X` at all times, without
-# ever being rebuilt from scratch.
-#
-# A derived summary has the signature
-#
-#     (model, data, X, s, i, t, reverse=false) -> nothing
-#
-# where `s` is the state being applied (or reversed) for individual `i` at time
-# `t`. It mutates `data.aggregates` in place. Write one with `@aggregate` (sugar),
-# or by hand — by hand you must supply the reverse yourself and honour `reverse`.
+# Reversibility is what makes the latent sampler correct and cheap: iFFBS
+# reverses individual `i` out of the aggregates, refilters (so `i` sees
+# leave-one-out counts), then re-applies. The aggregates therefore stay exactly
+# consistent with `X` without ever being rebuilt.
 
 """
     AggregateSpec(name, eltype, dims_expr, summary)
@@ -66,7 +54,7 @@ function _sugar_agg(ex::Expr, names)
 end
 
 # Rewrite `state == :I` into `state == <index of :I>`, so the user may compare
-# states by NAME. Comparing by number still works: declaring a state_space is what
+# states by name. Comparing by number still works: declaring a state_space is what
 # lets user and package agree on the numbering, and the symbol form is sugar over
 # exactly that numbering.
 _sugar_state_syms(x, ss) = x
@@ -90,7 +78,7 @@ end
     _state_code(state_space, s)
 
 The integer code of state `s` in `state_space`. A `Symbol` is looked up by name; an
-integer is returned as-is (so `state == :I` and `state == 2` both work — declaring
+integer is returned as-is (so `state == :I` and `state == 2` both work, declaring
 a `state_space` is what makes the two agree).
 """
 _state_code(ss, s::Integer) = s
@@ -107,7 +95,7 @@ _state_code(ss, s::QuoteNode) = _state_code(ss, s.value)
 #   if cond; arr[...] += 1; end               # a guarded update
 #   count(cond, arr[...])                     # count how many satisfy cond
 #
-# Two forms are deliberately NOT accepted, because Julia's parser gets to them
+# Two forms are deliberately not accepted, because Julia's parser gets to them
 # first: `arr[...] += 1 if cond` (postfix `if` is not Julia syntax) and
 # `arr[...] += 1, cond` (which parses as `arr[...] += (1, cond)`). Guard with a
 # real `if` block, or fold the condition into the contribution
@@ -116,7 +104,7 @@ function _aggregate_line_to_lambda(line, names, ss_expr)
     cond = :(true)
     upd = line
     if line isa Expr && line.head == :if
-        # `if cond; update; end` — the guard is the first argument, the body second.
+        # `if cond; update; end`: the guard is the first argument, the body second.
         cond = line.args[1]
         body = line.args[2]
         stmts = body isa Expr && body.head === :block ?
@@ -194,7 +182,7 @@ end
 ```
 
 For an aggregate the macro cannot express, write the summary by hand: any function
-`(model, data, X, s, i, t, reverse=false)` that honours `reverse` will do — pass it
+`(model, data, X, s, i, t, reverse=false)` that honours `reverse` will do, pass it
 as an [`AggregateSpec`](@ref) with your own storage.
 """
 macro aggregate(args...)
@@ -246,13 +234,13 @@ updates that maintain them. Pass it to [`epidemic_data`](@ref) as `aggregates`.
 its own concrete type, and `EpidemicData` propagates that type all the way through
 (see its `DS` type parameter).
 
-Storing them as a `Tuple` is necessary but NOT sufficient. A plain
-`for ds in data.derived_summaries` still infers the loop variable as the UNION of
-the element types and dispatches at runtime on every call — measured at 42.7% of
+Storing them as a `Tuple` is necessary but not sufficient. A plain
+`for ds in data.derived_summaries` still infers the loop variable as the union of
+the element types and dispatches at runtime on every call: measured at 42.7% of
 an iFFBS sweep's self time across the two loops in `iffbs_individual!`, both
 flagged for GC and dynamic dispatch by the profiler. Call them via
 [`apply_summaries!`](@ref), which recurses over the tuple so each step sees one
-concrete function type — exactly what `_fill_rates!` does for `rate_fns`.
+concrete function type: exactly what `_fill_rates!` does for `rate_fns`.
 """
 struct AggregateDeclaration{DS<:Tuple}
     specs::Vector{AggregateSpec}
@@ -283,7 +271,7 @@ Zero every aggregate array. The package does not know what the aggregates
 represent; it just clears their storage before a fresh sum-up.
 
 Use together with [`apply_derived_summaries!`](@ref) to establish the invariant
-that the aggregates agree with a given `X` — see that function's docstring.
+that the aggregates agree with a given `X`, see that function's docstring.
 """
 function reset_aggregates!(data)
     for v in values(data.aggregates)
@@ -309,7 +297,7 @@ apply_derived_summaries!(model, data, X)
 before the first likelihood evaluation. Thereafter the latent sampler maintains it
 incrementally (reversing and re-applying each individual's contribution), so
 neither this function nor a rebuild is needed again — the likelihood and the rate
-functions only ever READ the aggregates.
+functions only ever read the aggregates.
 """
 function apply_derived_summaries!(model, data, X)
     for i in 1:data.n_individuals
@@ -328,16 +316,16 @@ Run every derived summary for `(i, t)` with candidate state `s`, forwards when
 `reverse` is `false` and in reverse when it is `true`.
 
 **Always call the summaries through this, never with `for ds in summaries`.**
-The summaries are a `Tuple` of DIFFERENT concrete closure types. A plain `for`
+The summaries are a `Tuple` of different concrete closure types. A plain `for`
 loop infers the loop variable as their union, so every call dispatches at runtime
-and boxes its arguments — measured at **42.7% of an iFFBS sweep's self time**
+and boxes its arguments: measured at **42.7% of an iFFBS sweep's self time**
 across the two loops in `iffbs_individual!` (both flagged `gc? Y  dispatch? Y` by
 the profiler), and a large share of the sweep's 717 MB of allocation.
 
 Recursing over the tuple one element at a time specialises each step on a single
 concrete function, so the call devirtualises and the arguments stay unboxed. This
 is the same fix `_fill_rates!` applies to `TransitionSpec`'s `rate_fns`, for the
-same reason — see the performance notes in CLAUDE.md.
+same reason.
 
 `reverse` is passed positionally rather than as a keyword: a keyword argument on
 a call the compiler cannot resolve forces the slow kwarg path (a `NamedTuple`

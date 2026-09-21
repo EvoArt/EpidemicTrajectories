@@ -9,7 +9,7 @@
 #     which have closed forms given X and are cheaper and better-mixing that way
 #     than through NUTS;
 #   * iFFBS for the hidden trajectory X itself, once per sweep — which is the
-#     whole reason this package exists (see CLAUDE.md).
+#     whole reason this package exists.
 #
 # Run:  julia --project=examples examples/badger_fit.jl
 # Env:  BADGER_SWEEPS / BADGER_BURN / BADGER_ADAPTS / BADGER_SEED / BADGER_OUT

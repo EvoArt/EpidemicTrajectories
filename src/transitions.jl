@@ -18,7 +18,7 @@ The element type follows the parameters, so this differentiates cleanly under AD
 
 Allocates a fresh `N × N` matrix (and an `N`-length scratch vector); a caller that
 needs many of these in a tight loop — the iFFBS forward filter is the package's own
-example — should use [`transition_matrix_at!`](@ref) instead to reuse buffers
+example, should use [`transition_matrix_at!`](@ref) instead to reuse buffers
 across calls.
 """
 function transition_matrix_at(trans_mat::TransitionSpec, model, data::EpidemicData, X, i, t)
@@ -35,11 +35,11 @@ end
 In-place [`transition_matrix_at`](@ref): fills the caller-provided `N × N` matrix
 `P` and `N`-length scratch vector `rowsum` (both overwritten completely, so neither
 needs zeroing first) instead of allocating new ones. `rowsum` is pure scratch —
-nothing outside this call reads it — so one buffer may be reused across every
-`(i, t)` in a sweep; `P` is the whole return value and must NOT be reused before
+nothing outside this call reads it, so one buffer may be reused across every
+`(i, t)` in a sweep; `P` is the whole return value and must not be reused before
 the caller is done with it (the iFFBS forward filter, which needs every
 timepoint's matrix alive for the backward pass, allocates one `P` per timepoint
-but shares one `rowsum` across all of them — see `forward_filter`).
+but shares one `rowsum` across all of them, see `forward_filter`).
 """
 # --- Closing a row -----------------------------------------------------------
 #
@@ -55,10 +55,10 @@ but shares one `rowsum` across all of them — see `forward_filter`).
 # What happened next was not a graceful degradation: `epidemic_loglik` does
 # `log(p + 1e-12)`, and `log(-0.2 + 1e-12)` is a `DomainError` that takes the
 # chain down. It also reached the iFFBS filter, where a negative entry corrupts
-# the forward recursion silently — a row of `[-1.7, 0.9, 0.9, 0.9]` still sums to
+# the forward recursion silently: a row of `[-1.7, 0.9, 0.9, 0.9]` still sums to
 # 1.0, so the normalisation looks fine and the filtered distribution is nonsense.
 #
-# It bites hardest on models that SPLIT a state (several susceptible classes, a
+# It bites hardest on models that split a state (several susceptible classes, a
 # stratified population): each split adds another declared transition to the row,
 # so the slack that a two-state model always had disappears, and an HMC proposal
 # that pushes one hazard up during adaptation tips the row over.
@@ -66,7 +66,7 @@ but shares one `rowsum` across all of them — see `forward_filter`).
 # ## Why not simply floor the leftover at zero
 #
 # `max(0, 1 - rowsum)` stops the crash, and that alone is worth having. But it
-# leaves the row summing to `rowsum` rather than 1 — 2.7, in the case above — so
+# leaves the row summing to `rowsum` rather than 1 — 2.7, in the case above, so
 # the transition matrix is no longer stochastic, the filter's normalisation
 # silently reweights, and, worse, `d(self)/d(rate) == 0` in the floored region:
 # the sampler gets NO gradient signal telling it to come back. A loud failure is
@@ -74,10 +74,10 @@ but shares one `rowsum` across all of them — see `forward_filter`).
 #
 # ## What this does instead
 #
-# When the declared mass overflows, RESCALE the row to close it: every declared
+# When the declared mass overflows, rescale the row to close it: every declared
 # rate is divided by `rowsum` and the self-transition takes the remaining
 # `eps_self`. The row sums to 1 by construction, every entry stays positive, and
-# — the point — the result still varies smoothly with every rate, so the gradient
+# that is the point: the result still varies smoothly with every rate, so the gradient
 # keeps pointing back towards the feasible region.
 #
 # Below the overflow threshold nothing changes at all: `rowsum <= 1 - eps_self`
@@ -104,9 +104,9 @@ function transition_matrix_at!(P, rowsum, trans_mat::TransitionSpec, model, data
     fill!(P, zero(eltype(P)))
     fill!(rowsum, zero(eltype(rowsum)))
 
-    # `rate_fns` is a Tuple of DIFFERENT concrete function types, so iterating it
+    # `rate_fns` is a Tuple of different concrete function types, so iterating it
     # with a plain loop would infer the element as a union/Any and dispatch on
-    # every call — this is the hub of the package, so that cost lands everywhere.
+    # every call, this is the hub of the package, so that cost lands everywhere.
     # `_fill_rates!` recurses over the tuple instead, specialising on one rate at a
     # time, which keeps each call concrete.
     _fill_rates!(P, rowsum, trans_mat.rate_fns, trans_mat.transitions, 1, model, data, X, i, t)
@@ -136,7 +136,7 @@ building the matrix.
 This exists because the likelihood only ever wants one entry per `(i, t)`: the
 move the individual actually made. Going through the full matrix there allocates a
 fresh `n_states × n_states` array and evaluates every rate, for every individual at
-every timepoint — on the badger model that is ~380k matrix allocations per
+every timepoint: on the badger model that is ~380k matrix allocations per
 likelihood call, each of Dual numbers under AD. The sampler still uses the full
 matrix, because it genuinely needs every entry.
 
@@ -179,10 +179,10 @@ end
 
 # Walk the rate tuple once, accumulating only what the `from` row needs: the
 # requested entry, and the row's total (for the self-transition's leftover).
-# Recursive for the same reason as `_fill_rates!` — one concrete rate type per step.
+# Recursive for the same reason as `_fill_rates!`, one concrete rate type per step.
 @inline function _accum_row(::Tuple{}, transitions, k, from, to, model, data, X, i, t, p_to, rowsum, ::Type{T}) where {T}
     # A self-transition takes the mass the declared transitions leave behind.
-    # MUST agree with `transition_matrix_at!` entry for entry — the likelihood
+    # must agree with `transition_matrix_at!` entry for entry, the likelihood
     # reads this and the filter reads that, and the whole package assumes they are
     # the same number. `test/spec.jl` checks it for every (from, to).
     scale, self = _close_row(rowsum)
@@ -220,7 +220,7 @@ end
 # AD this is the backend's dual/tracked type, so the transition matrix follows
 # automatically and gradients flow.
 #
-# A parameter set mixes scalars and containers — `(; beta=0.1, alpha=[...])` — so
+# A parameter set mixes scalars and containers: `(; beta=0.1, alpha=[...])` — so
 # this reaches through arrays to the numbers inside rather than promoting the
 # container types (which would land on `Any`, and `zeros(Any, ...)` fails).
 # Non-numeric entries are ignored: a model may carry an integer index or a flag
@@ -255,7 +255,7 @@ A coupling term for models where an individual's state does not enter anyone
 else's transition rates: contributes nothing (all ones).
 
 Also the shape of the paper's "uncorrected" iFFBS proposal
-([`uncorrected_proposal`](@ref)) — a filter that deliberately ignores the coupling
+([`uncorrected_proposal`](@ref)): a filter that deliberately ignores the coupling
 for speed, whose error the MH step then corrects. Used that way in a plain
 [`iffbs!`](@ref) sweep it targets the wrong conditional.
 
@@ -274,13 +274,13 @@ coupling: for individual `j` at time `t`, the log-probability of the transition
 `j` actually makes under the current transition matrix.
 
 Uses [`transition_prob`](@ref), not [`transition_matrix_at`](@ref): only one
-entry — the move `j` actually made — is ever read here, and this is called once
+entry: the move `j` actually made, is ever read here, and this is called once
 per affected individual per candidate state inside [`make_rest_contribution`](@ref)
 (`n_states × |affected|` times per `(i, t)` in the iFFBS forward filter). Building
 the whole matrix just to read one entry was, before this, the dominant cost of a
-badger-model iFFBS sweep — confirmed by direct per-phase timing, not just
+badger-model iFFBS sweep: confirmed by direct per-phase timing, not just
 profiler self-time percentages (see the repro log): the earlier fixes to
-`forward_filter`'s OWN matrix build (buffer reuse) and to `derived_summaries`'
+`forward_filter`'s own matrix build (buffer reuse) and to `derived_summaries`'
 type stability were both real but left this call, one level further into the
 coupling term, still allocating a fresh matrix on every one of the
 `n_states × |affected|` calls this makes per timepoint.
@@ -299,7 +299,7 @@ end
 Which of a neighbour's moves the focal individual can influence, as an
 `n_states × n_states` mask over `(from, to)` pairs.
 
-`coupled_transitions` names the transitions whose RATE depends on the focal — e.g.
+`coupled_transitions` names the transitions whose rate depends on the focal — e.g.
 `[(:S, :E)]` for a model where the only effect one individual has on another is
 contributing to its force of infection. Names or indices both work.
 
@@ -313,7 +313,7 @@ own rate functions never look at the focal. Verified empirically: a neighbour's
 out changes the sampler's weights by up to 0.25.
 
 So declaring `[(:S, :E)]` in the badger model buys the skip only for neighbours
-currently in `E`, `I` or `D` — every `S -> *` move stays in. That is still most of
+currently in `E`, `I` or `D`: every `S -> *` move stays in. That is still most of
 the population once mortality bites, and it is exact.
 
 The saving is exact, not an approximation: a neighbour whose realised move is
@@ -330,7 +330,7 @@ function coupled_transition_mask(state_space, coupled_transitions)
         k
     end
 
-    # Any state with a coupled transition out of it has ALL of its outgoing
+    # Any state with a coupled transition out of it has all of its outgoing
     # transitions coupled: the rates out of a state must sum to one, so changing
     # one changes the others. Missing this makes the mask silently wrong.
     coupled_sources = Set{Int}(idx(from) for (from, _) in coupled_transitions)
@@ -354,24 +354,24 @@ individuals' actual transitions would be if `i` were in that state, and weights
 accordingly. Without this term the sampler targets the wrong conditional.
 
 The candidate state is applied by running the user's derived summaries forward and
-then reversing them — so the aggregates the neighbours' rates read reflect the
+then reversing them: so the aggregates the neighbours' rates read reflect the
 hypothesis, and are restored exactly afterwards. This is why the aggregate updates
 must be reversible.
 
 - `affected_ids`: `(data, t, i) -> individuals affected by i at time t`.
 - `neighbor_logprob`: `(model, data, X, j, t, updated_id) -> log-probability of j's
-  realized move` — see [`make_neighbor_logprob_from_transitions`](@ref).
+  realized move`: see [`make_neighbor_logprob_from_transitions`](@ref).
 
 ## Sampling windows
 
-!!! warning "UNVERIFIED: possible speed regression"
+!!! warning "Unverified: possible speed regression"
     The window check below has **not** been benchmarked. It skips ~0.2% of
     neighbour visits on the badger model (so it does slightly LESS
     `neighbor_logprob` work) but adds two integer comparisons and a tuple load
     per visit, inside the package's hottest loop. A first attempt to measure it
     was abandoned because the machine was too noisy to trust: readings ranged
-    3.7-6.7 s/sweep on the SAME code. Measure it properly on a quiet machine
-    before assuming it is free, per CLAUDE.md's benchmarking rule.
+    3.7-6.7 s/sweep on the same code. Measure it properly on a quiet machine
+    before assuming it is free.
 
 A neighbour `j` is scored at time `t` only when `t` lies inside `j`'s own
 `sampling_period` and leaves room for a step, i.e.
@@ -380,9 +380,9 @@ A neighbour `j` is scored at time `t` only when `t` lies inside `j`'s own
 not be in the target density, and `X[t + 1, j]` would be a cell the model never
 defines.
 
-This matters only for models with per-individual windows — with the default
+This matters only for models with per-individual windows: with the default
 `sampling_period` of `(1, n_timepoints)` for everyone, the check never fires. If
-you write your OWN `rest_contribution`, apply the same restriction; the exactness
+you write your own `rest_contribution`, apply the same restriction; the exactness
 of the iFFBS sweep depends on it, and [`check_iffbs_exact`](@ref) will tell you if
 you have not.
 """
@@ -419,7 +419,7 @@ function make_rest_contribution(; normalize=true, min_logprob=-1e12, affected_id
                 # It bit the badger model, silently, and had to be found with
                 # `check_iffbs_exact`: `Xinit` fills unmonitored cells with the
                 # SUSCEPTIBLE state, so an out-of-window neighbour read as a live
-                # groupmate making an `S -> S` move — a phantom susceptible whose
+                # groupmate making an `S -> S` move: a phantom susceptible whose
                 # "failure to get infected" was evidence against the focal being
                 # infectious. Measured: the focal's `I` weight pushed 0.575 ->
                 # 0.331, a systematic downward bias on prevalence over 68% of the
@@ -434,7 +434,7 @@ function make_rest_contribution(; normalize=true, min_logprob=-1e12, affected_id
                 # A neighbour whose realised move is not one the focal can
                 # influence has the same probability under every candidate state,
                 # so it contributes an identical constant that cancels on
-                # normalisation. Skipping it is exact, not an approximation — and
+                # normalisation. Skipping it is exact, not an approximation: and
                 # it saves building that neighbour's whole transition matrix.
                 if coupled_mask !== nothing
                     @inbounds coupled_mask[X[t, j], X[t + 1, j]] || continue

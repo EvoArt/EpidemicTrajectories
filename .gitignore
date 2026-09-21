@@ -37,3 +37,8 @@ examples/outputs/
 
 # Archived trajectories from the showcase scripts (large, regenerated)
 examples/showcase/*.jld2
+
+# Local scratch scripts
+desired_api.jl
+walkthrough_cattle.jl
+walkthrough_cattle_check.jl

@@ -40,3 +40,29 @@ EpidemicTrajectoriesR_DESIGN.md
 
 # Archived trajectories from the showcase scripts (large, regenerated)
 examples/showcase/*.jld2
+
+# Working notes kept locally, not repository content
+CLAUDE.md
+NOTES.md
+AGENTS.md
+.cursorrules
+.aider*
+.claude/
+
+# Working notes and session logs, kept locally
+HANDOVER.md
+badger_repro_log.md
+perf_gap_log.md
+iffbs_mh_design.md
+progression_bug.md
+refacto.md
+badger_fix_plan.md
+cpp_model_discrepancies.md
+iffbs_data_audit.md
+residuals_design.md
+residuals_handover.md
+AUDIT_*.md
+PERF_REPORT_*.md
+desired_api.jl
+walkthrough_cattle.jl
+walkthrough_cattle_check.jl

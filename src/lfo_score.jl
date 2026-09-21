@@ -141,8 +141,8 @@ function score_window(model, data::EpidemicData, X, t_star::Int, M::Int,
             end
         end
         if survival_weight !== nothing
-            # Eq-14: the weight converting the constrained proposal back to the
-            # true kernel. It MUST cover exactly the individuals the constraint
+            # The weight converting the constrained proposal back to the true
+            # kernel. It MUST cover exactly the individuals the constraint
             # covered -- see `survival_constrained`.
             for (key, w) in survival_weight(model, data, Xf, t_star, M, g)
                 acc[key] = get(acc, key, 0.0) + w

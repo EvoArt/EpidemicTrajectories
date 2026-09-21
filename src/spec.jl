@@ -1,11 +1,9 @@
-# The model specification: which states exist, which transitions between them are
-# allowed, and the rate of each.
+# The model specification: which states exist, which transitions are allowed,
+# and the rate of each.
 #
-# A rate is an ordinary function `(model, data, i, t) -> probability`, where
-# `model` is the parameters, `data` the structure/observations/aggregates, `i` the
-# individual and `t` the time. Anything a rate needs beyond the parameters — a
-# per-individual covariate, a group-level count, a spatial kernel — it reads off
-# `data`, so the package places no constraint on what a rate may depend on.
+# A rate is `(model, data, i, t) -> probability`. Anything it needs beyond the
+# parameters it reads off `data`, so the package places no constraint on what
+# a rate may depend on.
 
 """
     TransitionSpec(states, transitions, rate_fns, auto_self)
@@ -22,18 +20,18 @@ actually move an individual.
 `rate_fns` is a `Tuple`, and the type is parameterised on it, so each rate's own
 concrete function type is known. That is a performance decision, not a style one:
 as a `Vector{Function}` every rate call in `transition_matrix_at` — the hub of the
-whole package, called for every individual at every timepoint — would be a runtime
+whole package, called for every individual at every timepoint, would be a runtime
 dispatch returning `Any`, and the arithmetic on the result would box.
 
 ## The `coupling` view (survival-free rates)
 
-`coupling` holds a SECOND, survival-free view of the transitions, used ONLY by the
+`coupling` holds a second, survival-free view of the transitions, used only by the
 coupling term (`make_rest_contribution`). It exists to fix a subtle bug: `@survival`
 scales every live transition by `survival` and adds `* -> death` rows, so the main
 `rate_fns` compute `survival * infection`. But the coupling asks "how does the
 FOCAL change a neighbour's move probability", and the focal influences only the
 INFECTION factor, never the neighbour's own survival. Scoring the neighbour through
-the survival-scaled probability lets a small `survival` DESTROY the infection signal
+the survival-scaled probability lets a small `survival` destroy the infection signal
 — when `survival * infection` underflows to `0.0`, every focal candidate is scored
 identically and the coupling goes flat, silently degenerating the chain.
 
@@ -59,7 +57,7 @@ TransitionSpec(states, transitions, rate_fns, auto_self) =
 
 # Rates may be written at three levels of sugar, in decreasing order of brevity:
 #
-#   S -> I = infection_func                      # a bare NAME: called for you
+#   S -> I = infection_func                      # a bare name: called for you
 #   S -> I = infection_func * survival_func      # composed with arithmetic
 #   S -> I = 1 / model.m                         # a bare expression
 #   S -> I = (model, data, i, t) -> ...          # an explicit lambda (the fallback)
@@ -76,7 +74,7 @@ TransitionSpec(states, transitions, rate_fns, auto_self) =
 
 const _RATE_ARGS = (:model, :data, :i, :t)
 
-# Operators and functions that must NOT be rewritten into rate calls.
+# Operators and functions that must not be rewritten into rate calls.
 const _RATE_SAFE_CALLS = Set{Symbol}([
     :+, :-, :*, :/, :^, :\,
     :exp, :log, :log1p, :expm1, :sqrt, :abs, :inv,
@@ -169,7 +167,7 @@ function _parse_transition_block(block)
         end
     end
 
-    # The bare (survival-free) transitions — the infection/progression moves exactly
+    # The bare (survival-free) transitions: the infection/progression moves exactly
     # as written, before any survival scaling and before the death rows are added.
     # This is what the coupling term uses (see `TransitionSpec`'s `coupling` field).
     # `nothing` when there is no `@survival` (then the full spec IS survival-free).
@@ -183,9 +181,9 @@ function _parse_transition_block(block)
             to == death_state ? (from, to, rate) : (from, to, :(($survival_expr) * ($rate)))
         end
         # Every live state can die, not just the ones that happen to appear as a
-        # source above — an absorbing state like `I` (which only ever appears as a
+        # source above, an absorbing state like `I` (which only ever appears as a
         # destination) still needs its `I -> D`. So collect the live states from
-        # BOTH sides of every transition.
+        # both sides of every transition.
         live_states = Symbol[]
         for (from, to, _) in transitions
             for s in (from, to)
@@ -225,7 +223,7 @@ spec = @transitions [:S, :E, :I, :D] begin
     S -> E = infection
     E -> I = progression
 end
-# gives (S,E), (E,I), (S,D), (E,D), (I,D) — note the I -> D you never wrote
+# gives (S,E), (E,I), (S,D), (E,D), (I,D): note the I -> D you never wrote
 ```
 """
 macro survival(args...)
@@ -296,7 +294,7 @@ macro transitions(args...)
         :($(_check_state_space)(collect(Symbol, $(esc(state_space_expr))),
                                 Symbol[$(map(QuoteNode, seen_states)...)]))
 
-    # The survival-free coupling view, built over the SAME state encoding so its
+    # The survival-free coupling view, built over the same state encoding so its
     # indices line up. Only the bare infection/progression moves; `auto_self` gives
     # the leftover mass as the "stay" probability (e.g. S->S = 1 - foi), which is
     # exactly what the coupling scores a non-moving neighbour against. `nothing`

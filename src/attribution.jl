@@ -1,36 +1,13 @@
 # Source attribution: which of several competing sources caused an infection.
 #
-# The three quantities here all rest on one idea — that a force of infection
-# DECOMPOSES into named components (background/environmental, within-group
-# transmission, an imported case, ...) — and they read that decomposition three
-# different ways:
-#
-#   SourceAttributionResidual  a randomized-PIT RESIDUAL on the attributed source
-#                              (Lau et al. 2014 §2.2.2, the "infection-link
-#                              residual"). Diagnoses whether the model's
-#                              TRANSMISSION STRUCTURE is right, which neither a
-#                              waiting-time nor a survival residual can see.
-#   FOIRatioSummary            the share of cumulative hazard from one component.
-#                              A :raw scientific output — the endogenous/exogenous
-#                              split, not a diagnostic.
-#   case_reproduction_numbers  R_i, expected secondary infections caused by i.
-#                              Also :raw, and POPULATION-level (see below).
-#
-# ## Why the decomposition is DECLARED, not derived
-#
-# The package cannot split a force of infection by itself: `S -> E` is one rate
+# The package cannot split a force of infection by itself. `S -> E` is one rate
 # function returning one number, and nothing in it says which part is background
-# and which is transmission. The reference implementation recovers the split by
-# MUTATING SHARED STATE — `foi_primary` zeroes `data.totalNumInfec[g,t]`,
-# re-evaluates the group FOI, and restores the count. That is not thread-safe, it
-# corrupts `data` if anything throws between the zero and the restore, and it can
-# only ever produce a TWO-way split.
+# and which is transmission. So the user declares the components as ordinary
+# pure rate functions; this sums them, normalises, and never needs to know what
+# any of them means. That generalises to k sources for free, where recovering
+# the split by mutating shared state could only ever give a two-way one.
 #
-# So the user declares the components as ordinary pure rate functions, exactly as
-# they declare aggregates and transitions. The package sums them, normalises, and
-# never needs to know what any of them means. This also generalises for free:
-# Lau's eq 2.10 is defined for k sources, and per-neighbour attribution ("which
-# badger infected this one") is then just a longer component list.
+# Lau et al. (2014) section 2.2.2 for the infection-link residual.
 
 """
     SourceAttributionResidual(from => to; components, source, name=:source_attribution,
@@ -38,23 +15,23 @@
                               origin=:window_start)
 
 The **infection-link residual** (Lau et al. 2014, §2.2.2, eqs 2.6–2.7 and 2.10): a
-randomized-PIT residual on WHICH SOURCE caused each infection.
+randomized-PIT residual on which source caused each infection.
 
 This is the third member of the Lau family, alongside the exposure-time residual
-(§2.2.1) and the progression residual — and it asks a question neither of those
-can. A waiting-time residual checks WHEN an event happened; this checks WHERE the
+(§2.2.1) and the progression residual: and it asks a question neither of those
+can. A waiting-time residual checks when an event happened; this checks where the
 hazard came from. A model can get every waiting time right and still attribute
 infections to the wrong sources, and only this residual sees that.
 
-!!! danger "`source` is required, and the residual is VACUOUS without a real one"
-    The source must be **inferred from the data** — a latent variable your sampler
-    draws, stored in `data` — and must NOT be drawn from the same component rates
+!!! danger "`source` is required, and the residual is vacuous without a real one"
+    The source must be **inferred from the data**, a latent variable your sampler
+    draws, stored in `data` — and must not be drawn from the same component rates
     this residual then scores.
 
     This is not a stylistic preference, it is the difference between a diagnostic
     and a random number generator. If the source is drawn from probabilities `p`
     and the PIT interval is then built from those same `p`, the result is
-    **Uniform(0,1) by construction for any `p` whatsoever** — verified directly:
+    **Uniform(0,1) by construction for any `p` whatsoever**: verified directly:
     with two components the residual is uniform at shares of 0.5, 0.9, 0.99 and
     0.01 alike. Such a residual passes calibration perfectly and has exactly zero
     power; it can never detect a wrong transmission structure, which is the only
@@ -63,8 +40,8 @@ infections to the wrong sources, and only this residual sees that.
     In Lau et al. the infection-link sequence "determines the particular
     infectious–susceptible pair responsible for each infection event" and is part
     of the MCMC state, explored jointly with the parameters. The residual then
-    scores that INFERRED source against the model's predicted probabilities. That
-    comparison — inferred source vs predicted probability — is where all the
+    scores that inferred source against the model's predicted probabilities. That
+    comparison: inferred source vs predicted probability, is where all the
     diagnostic content lives.
 
 ## How it works
@@ -80,7 +57,7 @@ otherwise across many infections, the residuals pile up and the test fires.
 
 ## Arguments
 
-- `from => to` — the infection transition, e.g. `:S => :E`.
+- `from => to`: the infection transition, e.g. `:S => :E`.
 - `components` — **required**. Named pure rate functions, as a `NamedTuple` or a
   tuple of pairs:
 
@@ -90,7 +67,7 @@ otherwise across many infections, the residuals pile up and the test fires.
   ```
 
   Each is `(model, data, X, i, t) -> rate`. **They must sum to the model's total
-  force of infection** — the package cannot check this and does not try, exactly
+  force of infection**, the package cannot check this and does not try, exactly
   as it does not check that `coupling_trans_mat` agrees with `trans_mat`. Two or
   more components; with one there is nothing to attribute.
 
@@ -98,13 +75,13 @@ otherwise across many infections, the residuals pile up and the test fires.
   (`foi_primary` zeroes `data.totalNumInfec[g,t]`, evaluates, restores): these are
   pure functions, so nothing is mutated and the residual is safe under threading.
 
-- `source` — **required**. `(model, data, X, i, t) -> k`, the index (or name) of
+- `source`: **required**. `(model, data, X, i, t) -> k`, the index (or name) of
   the component inferred to have caused `i`'s infection at step `t`. Read it from
   wherever your sampler stores it, typically `data.infection_source[i]`. Return
   `nothing` or `missing` for an individual whose source was not inferred.
-- `origin` — where the infection-time scan starts. `:window_start` (default) or
+- `origin`: where the infection-time scan starts. `:window_start` (default) or
   `:entry_to_from_state`.
-- `require_start_state` — restrict to individuals in this state at their window
+- `require_start_state`: restrict to individuals in this state at their window
   start, e.g. `:S`. The reference does this unconditionally; here it is opt-in.
 
 An individual never infected returns `missing` — no source to attribute. Coverage
@@ -181,7 +158,7 @@ function SourceAttributionResidual(pair::Pair;
         end
 
         # The infection event. The rates are evaluated at `t_inf`, the step ACROSS
-        # which the move happened — matching the exposure residual's convention,
+        # which the move happened, matching the exposure residual's convention,
         # and the reference's `t_inf = tE - 1`.
         t_event = first_entry(X, i, to, t0, t_end)
         t_event === nothing && return missing      # never infected: nothing to attribute
@@ -224,12 +201,12 @@ _normalize_components(t::Tuple) = [Symbol(first(p)) => last(p) for p in t]
 _normalize_components(v::AbstractVector) = [Symbol(first(p)) => last(p) for p in v]
 _normalize_components(d::AbstractDict) = [Symbol(k) => v for (k, v) in sort!(collect(d), by=first)]
 
-# Lau et al. eqs 2.7 and 2.10, for ANY number of components.
+# Lau et al. eqs 2.7 and 2.10, for any number of components.
 #
 # 2.7  sort the model's predicted source probabilities ascending, cumulative sum;
-# 2.10 the PIT interval is the INFERRED source's slice of that cumulative mass.
+# 2.10 the PIT interval is the inferred source's slice of that cumulative mass.
 #
-# `inferred` is the source the sampler attributed, passed in from `data` — NOT
+# `inferred` is the source the sampler attributed, passed in from `data`: not
 # drawn here. Drawing it from `probs` would make the returned value uniform for
 # any `probs` at all, i.e. a residual with no power; see the constructor's
 # docstring. Everything diagnostic about this quantity comes from `inferred` and
@@ -237,7 +214,7 @@ _normalize_components(d::AbstractDict) = [Symbol(k) => v for (k, v) in sort!(col
 #
 # The reference hard-codes exactly two sources and needs a coin-flip branch when
 # their probabilities tie (it locates the source by MATCHING its probability
-# value, which is ambiguous when two are equal). Resolving by INDEX instead makes
+# value, which is ambiguous when two are equal). Resolving by index instead makes
 # ties fall out correctly with no special case: equal shares get adjacent,
 # equal-width slices, which is exactly right.
 @inline function _attribution_pit(comp_fns::Tuple, inferred::Int, model, data, X, i, t, rng)
@@ -283,11 +260,11 @@ end
                     window=:sampling_period, require_start_state=nothing)
 
 The share of an individual's cumulative force of infection contributed by one
-named component — the **endogenous/exogenous split**.
+named component, the **endogenous/exogenous split**.
 
 A `:raw` summary, not a residual: it is a ratio in `[0,1]` with no uniformity
 claim attached, so the calibration checks do not apply to it and
-[`uniformity_test`](@ref) will refuse it. It is a scientific output — "what
+[`uniformity_test`](@ref) will refuse it. It is a scientific output, "what
 fraction of infection pressure was background rather than within-group
 transmission" — and it shares only the per-individual, per-draw SHAPE with the
 residuals, which is why it lives on the same machinery.
@@ -296,11 +273,11 @@ Accumulation runs from the window start to the step before infection (or to
 censoring, for individuals never infected), matching the exposure residual's
 window exactly so the two are directly comparable.
 
-- `components` — as in [`SourceAttributionResidual`](@ref); must sum to the total
+- `components`, as in [`SourceAttributionResidual`](@ref); must sum to the total
   force of infection.
-- `numerator` — which component's share to report, by name.
+- `numerator`, which component's share to report, by name.
 
-Returns `missing` when the cumulative total is zero — no hazard accumulated means
+Returns `missing` when the cumulative total is zero: no hazard accumulated means
 no meaningful share, and a `NaN` would poison a downstream mean.
 
 # Example
@@ -343,7 +320,7 @@ function FOIRatioSummary(pair::Pair;
         end
 
         # Accumulate to the step before infection, or to censoring if never
-        # infected — the same window the exposure residual uses.
+        # infected, the same window the exposure residual uses.
         t_event = first_entry(X, i, to, t_start, t_end)
         t_stop = if t_event !== nothing
             t_event - 1
@@ -390,9 +367,9 @@ returned as a `Vector{Union{Float64,Missing}}`, one entry per individual.
 Every other quantity in this package is computed for one individual from that
 individual's own trajectory. R_i is not: attributing an infection requires knowing
 every infective present in the group at that moment, so it needs a pass over the
-WHOLE population before any single individual's value is known. Forcing it into
+whole population before any single individual's value is known. Forcing it into
 the `(model, data, X, i, rng)` contract would make each individual re-scan the
-entire population — `O(m² T)` instead of `O(m T)` — so it gets its own entry point.
+entire population — `O(m² T)` instead of `O(m T)`, so it gets its own entry point.
 
 Use [`summarize_population`](@ref) to run it across draws and get the same
 `SummaryResult` everything else produces.
@@ -406,16 +383,16 @@ occurring in its group while it was infectious. With uniform weights this is equ
 attribution; with weights encoding relative infectiousness (a sex-specific
 transmission coefficient, say) it splits proportionally.
 
-- `components` / `secondary` — the decomposition and which component is
+- `components` / `secondary`: the decomposition and which component is
   transmission (the part attributable to other individuals). Background infections
   are attributed to nobody, which is the point of the split.
-- `infection` — the transition marking a new infection, default `:S => :E`.
-- `infectious_state` — the state from which an individual can infect others.
+- `infection`: the transition marking a new infection, default `:S => :E`.
+- `infectious_state`, the state from which an individual can infect others.
 - `group` — `(data, i, t) -> group id`; defaults to `data.group[i]`. Pass your own
   for time-varying membership.
-- `weight` — relative infectiousness, default uniform.
+- `weight`: relative infectiousness, default uniform.
 
-An individual that is never infectious gets `missing` — it had no opportunity to
+An individual that is never infectious gets `missing`: it had no opportunity to
 infect anyone, which is different from having had the opportunity and infected
 nobody (that is a genuine `0.0`).
 """
@@ -483,7 +460,7 @@ function case_reproduction_numbers(model, data::EpidemicData, X;
                 break
             end
         end
-        # Never infectious is `missing` — no opportunity to infect anyone. That is
+        # Never infectious is `missing`: no opportunity to infect anyone. That is
         # a different statement from an infectious individual who happened to
         # infect nobody, which is a genuine 0.0 and must stay in the sample.
         ever_infectious || continue
@@ -504,12 +481,12 @@ end
 """
     summarize_population(f, name, data, draws; kind=:raw) -> SummaryResult
 
-Run a POPULATION-level summary over draws, giving the same
+Run a population-level summary over draws, giving the same
 [`SummaryResult`](@ref) the per-individual driver produces.
 
 `f(model, data, X) -> Vector{Union{Float64,Missing}}` of length
 `data.n_individuals`. This is the seam for a quantity that cannot be computed one
-individual at a time — [`case_reproduction_numbers`](@ref) is the motivating case,
+individual at a time, [`case_reproduction_numbers`](@ref) is the motivating case,
 since attributing an infection needs the whole population's state at that moment.
 
 Because the result is a `SummaryResult`, everything downstream works unchanged:

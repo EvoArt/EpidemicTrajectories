@@ -107,6 +107,35 @@ end
     @test rate_of(:I, :D) ≈ 1 - 0.9
 end
 
+_spec_step(model, data, i, t) = (; live = 1 - model.mu, inf = model.beta)
+_spec_foi(model, data, i, t, shared) = shared.inf
+_spec_surv(model, data, i, t, shared) = shared.live
+
+@testset "@shared: one value per step, handed to every rate" begin
+    spec = @transitions [:S, :E, :I, :D] begin
+        @shared _spec_step
+        @survival _spec_surv death=:D
+        S -> E = _spec_foi
+        E -> I = 0.2
+    end
+    model = (; mu = 0.1, beta = 0.3)
+    sh = _spec_step(model, nothing, 1, 1)
+    @test spec.shared === _spec_step
+    rate_of(from, to) =
+        spec.rate_fns[findfirst(==((from, to)), spec.transitions)](model, nothing, 1, 1, sh)
+    # bare names and the survival factor take `shared` too
+    @test rate_of(:S, :E) ≈ 0.9 * 0.3
+    @test rate_of(:E, :I) ≈ 0.9 * 0.2
+    @test rate_of(:I, :D) ≈ 0.1
+    # the survival-free coupling view carries the same step function
+    @test spec.coupling.shared === _spec_step
+    @test_throws Exception @eval @transitions [:S, :I] begin
+        @shared _spec_step
+        @shared _spec_step
+        S -> I = _spec_foi
+    end
+end
+
 @testset "@survival: needs a death state" begin
     @test_throws Exception @eval @transitions [:S, :D] begin
         @survival $surv

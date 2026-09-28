@@ -49,7 +49,7 @@ profiling: this alone accounted for the bulk of a ~6x gap between the badger
 model's iFFBS sweep and its reference-implementation counterpart, matching the
 same pattern found earlier for `trans_mat`: see the devlog/repro log for both.
 """
-struct EpidemicData{SS,OP,OW,RC,NL,EX<:NamedTuple,AG<:NamedTuple,RF<:Tuple,CP,DS<:Tuple}
+struct EpidemicData{SS,OP,OW,RC,NL,EX<:NamedTuple,AG<:NamedTuple,RF<:Tuple,CP,DS<:Tuple,SH}
     n_individuals::Int
     n_timepoints::Int
     n_states::Int
@@ -63,8 +63,9 @@ struct EpidemicData{SS,OP,OW,RC,NL,EX<:NamedTuple,AG<:NamedTuple,RF<:Tuple,CP,DS
     # and so an abstract field, so every `data.trans_mat` read boxes and dispatches at
     # runtime. That field is the hub of the package (`transition_matrix_at!`,
     # `transition_prob`, for every individual at every timepoint), so an abstract
-    # type here is the single most expensive instability the struct can have.
-    trans_mat::TransitionSpec{RF,CP}
+    # type here is the single most expensive instability the struct can have. The
+    # same holds for the third, `SH`, the shared step values.
+    trans_mat::TransitionSpec{RF,CP,SH}
     starting_state::SS
     # The observation model comes in two shapes. `observation_process` returns the
     # whole per-state weight vector (what the filter needs); `observation_weight`
@@ -142,6 +143,17 @@ at all. Supply your own `observation_process` to `epidemic_data` for a model wit
 data — the package has no idea what you observe or how it relates to the states.
 """
 no_observations(model, data, X, i, t) = ones(Float64, data.n_states)
+
+# An observation weight that takes the step's shared values, `weight(model, data,
+# X, i, t, s, shared(model, data, i, t))`, behind the ordinary six-argument
+# signature. Called that way it recomputes `shared` for each state; the marginal
+# likelihood recognises the type and computes it once per `(i, t)`.
+struct SharedObservationWeight{W,S}
+    weight::W
+    shared::S
+end
+(w::SharedObservationWeight)(model, data, X, i, t, s) =
+    w.weight(model, data, X, i, t, s, w.shared(model, data, i, t))
 
 """
     members(data, g)
@@ -222,6 +234,13 @@ Build the [`EpidemicData`](@ref) for a model.
       sees `capture × tests` but whose likelihood scores only the `tests` factor,
       capture being conjugate). When both are set they must agree entry-for-entry.
   Defaults to [`no_observations`](@ref) when neither is given.
+- `observation_shared`: `(model, data, i, t) -> value`, quantities every state's
+  observation weight at `(i, t)` needs (a detection probability, a test's
+  sensitivity). With it, `observation_weight` takes a seventh argument,
+  `(model, data, X, i, t, s, shared)`. The marginal likelihood computes it once
+  per `(i, t)`; every other consumer sees an ordinary six-argument weight that
+  computes it on each call. The observation counterpart of `@shared` in
+  [`@transitions`](@ref).
 - `sampling_period`: `(first, last)` timepoint per individual. Defaults to
   `(1, n_timepoints)` for everyone.
 - `affected_individuals`: who each individual's state affects, indexed `[t, i]`,
@@ -372,6 +391,7 @@ function epidemic_data(; n_individuals, n_timepoints, trans_mat,
                          group=ones(Int, n_individuals),
                          observation_process=nothing,
                          observation_weight=nothing,
+                         observation_shared=nothing,
                          sampling_period=nothing,
                          affected_individuals=nothing,
                          coupled_transitions=nothing,
@@ -481,6 +501,11 @@ function epidemic_data(; n_individuals, n_timepoints, trans_mat,
     #     the likelihood's factor is not a plain restriction of the filter's vector);
     #   * neither                -> `no_observations` (the honest default).
     n_states = length(state_space)
+    if observation_shared !== nothing
+        observation_weight === nothing && throw(ArgumentError(
+            "`observation_shared` is passed to `observation_weight`, which was not given"))
+        observation_weight = SharedObservationWeight(observation_weight, observation_shared)
+    end
     if observation_process === nothing && observation_weight !== nothing
         ow = observation_weight
         observation_process = (model, data, X, i, t) ->

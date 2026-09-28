@@ -41,19 +41,38 @@ never enters the coupling, so it cannot annihilate the signal. When there is no
 `@survival`, `coupling === nothing` and the coupling falls back to the full spec
 (correct, since there is no survival factor to strip).
 
+## Shared step values
+
+Several rates out of one `(i, t)` often need the same quantities: a death
+probability that scales every live move, a hazard built from covariates. Written
+rate by rate, each is recomputed once per rate that uses it, and under
+forward-mode AD every repeat carries the full set of partials.
+
+`shared`, when given, is a function `(model, data, i, t) -> value` evaluated
+once per `(i, t)`; every rate is then called as `rate(model, data, i, t, shared)`
+and reads what it needs from that value (typically a `NamedTuple`). Like a rate,
+it may read the parameters, the data and `(i, t)`. Where the package re-adds the
+focal individual to the aggregates before evaluating a rate (the latent
+sampler's coupling term), `shared` is recomputed after that adjustment, so one
+that reads an aggregate is still exact there.
+
 Build one with [`@transitions`](@ref) rather than calling this directly.
 """
-struct TransitionSpec{RF<:Tuple,C}
+struct TransitionSpec{RF<:Tuple,C,S}
     states::Vector{Symbol}
     transitions::Vector{Tuple{Symbol,Symbol}}
     rate_fns::RF
     auto_self::Bool
     coupling::C            # a survival-free TransitionSpec, or `nothing`
+    shared::S              # `(model, data, i, t) -> values` for every rate, or `nothing`
 end
-# Backward-compatible constructor: no separate coupling view (coupling === nothing
-# means "use the full spec", which is correct whenever there is no survival factor).
+# Backward-compatible constructors: no separate coupling view (coupling === nothing
+# means "use the full spec", which is correct whenever there is no survival
+# factor), and no shared step values.
 TransitionSpec(states, transitions, rate_fns, auto_self) =
-    TransitionSpec(states, transitions, rate_fns, auto_self, nothing)
+    TransitionSpec(states, transitions, rate_fns, auto_self, nothing, nothing)
+TransitionSpec(states, transitions, rate_fns, auto_self, coupling) =
+    TransitionSpec(states, transitions, rate_fns, auto_self, coupling, nothing)
 
 # Rates may be written at three levels of sugar, in decreasing order of brevity:
 #
@@ -73,6 +92,8 @@ TransitionSpec(states, transitions, rate_fns, auto_self) =
 # defeats it can always drop to the explicit-lambda fallback.
 
 const _RATE_ARGS = (:model, :data, :i, :t)
+# With a `@shared` line, every rate also receives the step's shared values.
+const _SHARED_RATE_ARGS = (:model, :data, :i, :t, :shared)
 
 # Operators and functions that must not be rewritten into rate calls.
 const _RATE_SAFE_CALLS = Set{Symbol}([
@@ -82,18 +103,17 @@ const _RATE_SAFE_CALLS = Set{Symbol}([
     :zero, :one, :float, :Float64,
 ])
 
-_is_rate_local(s::Symbol) = s in _RATE_ARGS
-
-# Rewrite bare rate-function names into `name(model, data, i, t)` calls.
-_sugar_rate(x) = x
-function _sugar_rate(x::Symbol)
-    (_is_rate_local(x) || x in _RATE_SAFE_CALLS) && return x
+# Rewrite bare rate-function names into calls with the rate signature `args`.
+_sugar_rate(x, args = _RATE_ARGS) = x
+function _sugar_rate(x::Symbol, args = _RATE_ARGS)
+    (x in args || x in _RATE_SAFE_CALLS) && return x
     # A bare name in rate position: call it with the rate signature.
-    return :($x(model, data, i, t))
+    return :($x($(args...)))
 end
-function _sugar_rate(ex::Expr)
+function _sugar_rate(ex::Expr, args = _RATE_ARGS)
     # `model.m`, `data.aggregates[...]` etc: leave the field/index path alone.
     ex.head === :. && return ex
+    sub(x) = _sugar_rate(x, args)
     if ex.head === :call
         f = ex.args[1]
         # An explicit call like `infection_func(model, data, i, t)` stays as written;
@@ -102,20 +122,20 @@ function _sugar_rate(ex::Expr)
             return ex
         end
         # An arithmetic/known call: sugar the arguments, keep the operator.
-        return Expr(:call, f, map(_sugar_rate, ex.args[2:end])...)
+        return Expr(:call, f, map(sub, ex.args[2:end])...)
     end
     if ex.head === :ref
         # `arr[idx]`: sugar the indices but not the array name itself.
-        return Expr(:ref, ex.args[1], map(_sugar_rate, ex.args[2:end])...)
+        return Expr(:ref, ex.args[1], map(sub, ex.args[2:end])...)
     end
-    return Expr(ex.head, map(_sugar_rate, ex.args)...)
+    return Expr(ex.head, map(sub, ex.args)...)
 end
 
-# Wrap a rate into the full `(model, data, i, t)` signature. An explicit lambda is
-# used exactly as written (the power-user fallback); anything else is sugared.
-function _wrap_rate_expr(rate)
+# Wrap a rate into the full signature. An explicit lambda is used exactly as
+# written (the power-user fallback); anything else is sugared.
+function _wrap_rate_expr(rate, args = _RATE_ARGS)
     (rate isa Expr && rate.head == :->) && return rate
-    return :((model, data, i, t) -> ($(_sugar_rate(rate))))
+    return :(($(args...),) -> ($(_sugar_rate(rate, args))))
 end
 
 # The source of a transition line is either one state (`S -> I`) or several
@@ -253,6 +273,22 @@ spec = @transitions :individual :auto_self begin
     I -> S = recovery_func(model, data, i, t)
 end
 ```
+
+A `@shared f` line computes `f(model, data, i, t)` once per `(i, t)` and hands
+it to every rate as a fifth argument, `shared` (see [`TransitionSpec`](@ref)).
+Use it when several rates need the same quantities:
+
+```julia
+step(model, data, i, t) = (; die = 1 - exp(-model.mu * data.age[t, i]))
+spec = @transitions [:S, :I, :D] begin
+    @shared step
+    S -> I = (model, data, i, t, shared) -> (1 - shared.die) * model.beta
+    S -> D = (model, data, i, t, shared) -> shared.die
+    I -> D = (model, data, i, t, shared) -> shared.die
+end
+```
+
+A bare rate name `r` is then called as `r(model, data, i, t, shared)`.
 """
 macro transitions(args...)
     rest = collect(args)
@@ -284,10 +320,14 @@ macro transitions(args...)
     block = rest[1]
     block isa Expr && block.head == :block || error("@transitions body must be begin...end")
 
+    block, shared_expr = _take_shared_line(block)
+    rate_args = shared_expr === nothing ? _RATE_ARGS : _SHARED_RATE_ARGS
+    shared_val = shared_expr === nothing ? :nothing : esc(shared_expr)
+
     trs, bare = _parse_transition_block(block)
     seen_states = unique(vcat(Symbol[t[1] for t in trs], Symbol[t[2] for t in trs]))
     trans_pairs = [:(($(QuoteNode(t[1])), $(QuoteNode(t[2])))) for t in trs]
-    rates = [_wrap_rate_expr(t[3]) for t in trs]
+    rates = [_wrap_rate_expr(t[3], rate_args) for t in trs]
 
     states_expr = state_space_expr === nothing ?
         :(Symbol[$(map(QuoteNode, seen_states)...)]) :
@@ -303,11 +343,11 @@ macro transitions(args...)
         :nothing
     else
         bare_pairs = [:(($(QuoteNode(t[1])), $(QuoteNode(t[2])))) for t in bare]
-        bare_rates = [_wrap_rate_expr(t[3]) for t in bare]
+        bare_rates = [_wrap_rate_expr(t[3], rate_args) for t in bare]
         :(TransitionSpec($states_expr,
                          Tuple{Symbol,Symbol}[$(bare_pairs...)],
                          ($(map(esc, bare_rates)...),),
-                         true, nothing))
+                         true, nothing, $shared_val))
     end
 
     quote
@@ -317,8 +357,27 @@ macro transitions(args...)
             ($(map(esc, rates)...),),
             $(auto_self),
             $coupling_expr,
+            $shared_val,
         )
     end
+end
+
+# Pull an `@shared f` line out of a `@transitions` body, returning the remaining
+# block and `f` (or `nothing`).
+function _take_shared_line(block)
+    shared = nothing
+    kept = Any[]
+    for x in block.args
+        if x isa Expr && x.head == :macrocall && x.args[1] == Symbol("@shared")
+            shared === nothing || error("@transitions: more than one @shared line")
+            vals = [a for a in x.args[2:end] if !(a isa LineNumberNode)]
+            length(vals) == 1 || error("@shared takes one function, `@shared f`")
+            shared = vals[1]
+        else
+            push!(kept, x)
+        end
+    end
+    Expr(:block, kept...), shared
 end
 
 # A user-supplied state_space must cover every state the transitions mention; it

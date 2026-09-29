@@ -42,3 +42,8 @@ examples/showcase/*.jld2
 desired_api.jl
 walkthrough_cattle.jl
 walkthrough_cattle_check.jl
+
+# Local only: the badger data and its runner, papers and scratch output
+/*.pdf
+/read_log.py
+/examples/residuals_out/

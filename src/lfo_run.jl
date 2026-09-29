@@ -43,6 +43,10 @@ Everything `lfo_cv` needs from a model.
   collapsed fit returns `draws` alone. `ForwardSimulation()` needs them, and
   for a collapsed fit of independent individuals draws them itself, by backward
   sampling from each draw's exact posterior given the training data.
+  A fit may also return a NamedTuple `(draws, X, sampler)`. `sampler` is
+  whatever the fit needs to start a later fit where this one ended (final
+  values, adapted metric and step size); `lfo_cv` keeps it per cutoff in
+  `result.meta[:sampler]` and never reads it.
 - `plan::TruncationPlan`, from [`truncation`](@ref).
 
 # Scoring
@@ -221,11 +225,14 @@ function lfo_cv(spec::LFOSpec, data::EpidemicData;
 
     known = known_times(data, spec.plan)
     windows = WindowResult[]
+    samplers = Dict{Int,Any}()
     for t in ts
         train = truncate_data(data, spec.plan, t)
 
         t_fit = time()
-        draws, X_draws = _split_fit(_fit_cached(spec, train, t, cache, verbose))
+        fitted = _fit_cached(spec, train, t, cache, verbose)
+        draws, X_draws = _split_fit(fitted)
+        fitted isa NamedTuple && haskey(fitted, :sampler) && (samplers[t] = fitted.sampler)
         fit_secs = time() - t_fit
 
         t_score = time()
@@ -280,7 +287,8 @@ function lfo_cv(spec::LFOSpec, data::EpidemicData;
     res = LFOResult(windows, gnames, L, M,
                     Dict{Symbol,Any}(:n_sim => spec.scorer isa ExactHMM ? nothing : spec.n_sim,
                                      :scorer => _scorer_name(spec.scorer),
-                                     :stride => stride, :cache => cache))
+                                     :stride => stride, :cache => cache,
+                                     :sampler => samplers))
 
     # A worker writes its one window where `sweep_status` looks for it. Existence
     # of this file is what marks the item done -- never a progress log, which is

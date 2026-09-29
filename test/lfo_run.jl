@@ -100,6 +100,29 @@ end
     @test length(r2.windows) == length(r1.windows)
 end
 
+@testset "lfo_cv: a fit's sampler state is kept per cutoff, cached or not" begin
+    s = _sid_run()
+    truth = (; α = 0.02, β = 0.03, m = 4.0, μ = 0.02)
+    X_obs = epidemic_simulator(s.data)(StableRNG(2), truth)
+    fit = (train, cutoff) ->
+        (draws = [truth for _ in 1:3], X = [copy(X_obs) for _ in 1:3],
+         sampler = (; cutoff, step_size = 0.1 * cutoff))
+    spec = LFOSpec(fit = fit, cell_logdensity = (m, d, X, i, t) -> -0.3,
+                   plan = truncation(clamp = (:last_seen,), keep = (:sex,)))
+    dir = mktempdir()
+    for _ in 1:2                           # the second pass reads the cache
+        res = lfo_cv(spec, s.data; L = 12, M = 2, cache = dir, verbose = false)
+        @test sort(collect(keys(res.meta[:sampler]))) == cutoffs(res)
+        @test all(res.meta[:sampler][t] == (; cutoff = t, step_size = 0.1 * t)
+                  for t in cutoffs(res))
+        @test all(w.n_draws == 3 for w in res.windows)
+    end
+    plain = LFOSpec(fit = _fake_fit(truth, X_obs, 3),
+                    cell_logdensity = (m, d, X, i, t) -> -0.3,
+                    plan = truncation(clamp = (:last_seen,), keep = (:sex,)))
+    @test isempty(lfo_cv(plain, s.data; L = 12, M = 2, verbose = false).meta[:sampler])
+end
+
 @testset "lfo_cv: a constraint without its weight is refused" begin
     s = _sid_run()
     truth = (; α = 0.02, β = 0.03, m = 4.0, μ = 0.02)

@@ -16,7 +16,9 @@ Fields:
   path. Nothing in the package requires groups to be fixed, or to exist at all:
   the coupling structure is `affected_individuals`, and a model with time-varying
   membership indexes its own structure off `data` however it likes.
-- `sampling_period`: `(first, last)` timepoint per individual
+- `sampling_period`: `(first, last)` timepoint per individual. `first > last`
+  denotes an empty period, as used by LFO truncation for individuals that have
+  not entered the study by the cutoff.
 - `trans_mat`, the [`TransitionSpec`](@ref)
 - `starting_state`: `(model, data, X, i, t) -> probability vector` at the
   individual's first timepoint
@@ -242,7 +244,8 @@ Build the [`EpidemicData`](@ref) for a model.
   computes it on each call. The observation counterpart of `@shared` in
   [`@transitions`](@ref).
 - `sampling_period`: `(first, last)` timepoint per individual. Defaults to
-  `(1, n_timepoints)` for everyone.
+  `(1, n_timepoints)` for everyone. An empty period is represented by
+  `first > last`; likelihood and latent-state updates skip it.
 - `affected_individuals`: who each individual's state affects, indexed `[t, i]`,
   so it may vary over time. Defaults to groupmates under a fixed `group` (see
   [`build_affected_individuals_from_groups`](@ref)). Pass your own for a network,

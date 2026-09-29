@@ -412,6 +412,7 @@ while it is being resampled.
 function iffbs_individual!(model, data::EpidemicData, X, i, rng,
                            proposal=iffbs_proposal(data))
     start_sampling, end_sampling = data.sampling_period[i]
+    start_sampling <= min(end_sampling, data.n_timepoints) || return nothing
     xᵢ = @view X[start_sampling:end_sampling, i]
 
     # `apply_summaries!` (aggregates.jl), not `for ds in data.derived_summaries`:

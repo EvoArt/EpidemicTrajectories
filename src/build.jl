@@ -244,6 +244,7 @@ function _build_loglik(slp::F, et, surv) where {F}
 
         for i in 1:data.n_individuals
             first_t, last_t = data.sampling_period[i]
+            first_t <= min(last_t, data.n_timepoints) || continue
             # Score the starting state at the individual's own window start, not at
             # absolute time 1. iFFBS imputes and stores the trajectory over
             # [first_t, last_t] only (iffbs_individual!: xᵢ = X[first_t:last_t, i])
@@ -534,6 +535,7 @@ function _build_conditional(slp::F, obs::O, obsw::W, nlp::NL,
         first_t, last_t_raw = data.sampling_period[i]
         T = data.n_timepoints
         last_t = min(last_t_raw, T)
+        first_t <= last_t || return ll
 
         # (1) starting state, at the individual's own window start — identical to
         # `epidemic_loglik`, including the 1e-12 guard, because any difference

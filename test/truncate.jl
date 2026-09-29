@@ -10,7 +10,7 @@
 # Minimal two-state model, mirroring test/iffbs.jl's setup but with the kinds of
 # extras a real model attaches: a per-individual "last seen" vector, an event
 # list of (individual, time) pairs, an in-place-mutated matrix, and a covariate.
-function _trunc_setup(; n_ind=6, n_t=10)
+function _trunc_setup(; n_ind=6, n_t=10, sampling_period=nothing)
     group = repeat(1:2; inner=n_ind ÷ 2)
     state_space = [:S, :I]
 
@@ -30,6 +30,7 @@ function _trunc_setup(; n_ind=6, n_t=10)
     data = epidemic_data(;
         n_individuals=n_ind, n_timepoints=n_t, group=group,
         trans_mat=spec, starting_state=starting_state, aggregates=aggs,
+        sampling_period=sampling_period,
         # extras of each shape the rules have to cope with
         last_seen = [3, 5, 7, 9, 10, 10],                  # clamp
         events = [(1, 2), (2, 6), (3, 9), (4, 10)],        # filter
@@ -152,4 +153,76 @@ end
     train = truncate_data(s.data, plan, 6)
     @test all(==(0), train.aggregates[:n_infected])
     @test all(==(7), s.data.aggregates[:n_infected])   # source untouched
+end
+
+@testset "truncation: future entrants are absent from the training fit" begin
+    # Individuals 3 and 4 first enter after the cutoff. Their truncated periods
+    # must be empty, not one-cell windows at their future first capture.
+    periods = [(1, 10), (3, 9), (7, 10), (8, 10), (1, 5), (2, 10)]
+    s = _trunc_setup(sampling_period=periods)
+    plan = truncation(clamp=(:last_seen,), filter=(:events,),
+                      copy=(:tests,), keep=(:sex,))
+    train = truncate_data(s.data, plan, 6)
+
+    @test train.sampling_period ==
+        [(1, 6), (3, 6), (7, 6), (8, 6), (1, 5), (2, 6)]
+    @test all(isempty(f:l) for (f, l) in train.sampling_period[3:4])
+
+    # Empty-period trajectories contribute neither latent nor observation
+    # likelihood and are not touched by the latent sampler.
+    X = fill(1, s.n_t, s.n_ind)
+    ll = epidemic_loglik(train)
+    oll = epidemic_obs_loglik(train)
+    before = ll((;), train, X) + oll((;), train, X)
+    X[7:10, 3:4] .= 2
+    @test ll((;), train, X) + oll((;), train, X) == before
+    held = copy(X[:, 3:4])
+    iffbs_individual!((;), train, X, 3, StableRNG(71))
+    iffbs_individual!((;), train, X, 4, StableRNG(72))
+    @test X[:, 3:4] == held
+
+    proposal = iffbs_proposal(train)
+    target = epidemic_conditional_loglik(train)
+    stats = MHStats(train.n_individuals)
+    @test iffbs_mh_individual!((;), train, X, 3, StableRNG(73),
+                               proposal, target, stats) === nothing
+    @test sum(stats.proposed) == 0
+    @test sum(stats.identical) == 0
+    @test X[:, 3:4] == held
+end
+
+@testset "truncation: an individual not yet known is absent, even if present" begin
+    # Individual 2's sampling period opens at 1 (it was alive, like a cub born
+    # into a watched group) but the study only learns of it at 8. A fit at
+    # cutoff 6 must not contain it; one at 8 must.
+    s = _trunc_setup()
+    first_seen = [1, 8, 1, 3, 1, 1]
+    data = epidemic_data(;
+        n_individuals=s.n_ind, n_timepoints=s.n_t, group=s.data.group,
+        trans_mat=s.data.trans_mat, starting_state=s.data.starting_state,
+        aggregates=Dict(k => zero(v) for (k, v) in pairs(s.data.aggregates)),
+        derived_summaries=s.data.derived_summaries,
+        last_seen=s.data.last_seen, first_seen=first_seen)
+    plan = truncation(clamp=(:last_seen,), keep=(:first_seen,),
+                      known_from=:first_seen)
+    @test known_times(data, plan) == first_seen
+    @test known_times(data, truncation(clamp=(:last_seen,), keep=(:first_seen,))) ==
+          fill(1, s.n_ind)
+
+    train = truncate_data(data, plan, 6)
+    @test isempty(range(train.sampling_period[2]...))
+    @test train.sampling_period[4] == (1, 6)     # known at 3, so present
+    @test train.sampling_period[1] == (1, 6)
+
+    X = fill(1, s.n_t, s.n_ind)
+    ll = epidemic_loglik(train)
+    before = ll((;), train, X)
+    X[:, 2] .= 2
+    @test ll((;), train, X) == before
+    held = copy(X[:, 2])
+    iffbs_individual!((;), train, X, 2, StableRNG(81))
+    @test X[:, 2] == held
+
+    @test train.sampling_period[2] != data.sampling_period[2]
+    @test truncate_data(data, plan, 8).sampling_period[2] == (1, 8)
 end

@@ -76,10 +76,13 @@ A declared, checked recipe for truncating an `EpidemicData`. Build with
 struct TruncationPlan{R<:NamedTuple}
     rules::R
     strict::Bool
+    known_from::Union{Nothing,Symbol}
 end
+TruncationPlan(rules::NamedTuple, strict::Bool) = TruncationPlan(rules, strict, nothing)
 
 """
-    truncation(; clamp=(), filter=(), copy=(), keep=(), custom=(), strict=true)
+    truncation(; clamp=(), filter=(), copy=(), keep=(), custom=(), strict=true,
+                 known_from=nothing)
 
 Declare how each entry of `EpidemicData.extras` behaves under truncation, for
 leave-future-out cross-validation.
@@ -98,6 +101,17 @@ one-word statement that you checked.
 - `keep`   , carried through untouched; an explicit "no future information here".
 - `custom`  — `name => (v, cutoff) -> new_v` for anything else.
 
+# When an individual becomes known
+`known_from` names an extra holding, per individual, the first time the study
+knew it existed. By default that is the start of its `sampling_period`. It must
+be given separately when the sampling period opens before the individual was
+first observed: a badger's opens at birth, but nobody knows about a cub until
+it is caught. Without it, a fit at cutoff `t` would include an animal whose
+existence only a later capture revealed, and so would the forecast from `t`.
+
+An individual not yet known at the cutoff gets an empty sampling period in the
+training copy; [`score_window`](@ref) neither scores nor simulates it.
+
 # Example
 ```julia
 plan = truncation(
@@ -110,7 +124,8 @@ train = truncate_data(data, plan, 128)
 ```
 """
 function truncation(; clamp = (), filter = (), copy = (), keep = (),
-                      custom = (), strict::Bool = true)
+                      custom = (), strict::Bool = true,
+                      known_from::Union{Nothing,Symbol} = nothing)
     pairs = Pair{Symbol,TruncationRule}[]
     for n in clamp;  push!(pairs, n => Clamp()); end
     for n in filter; push!(pairs, n isa Pair ? (n.first => Filter(n.second)) :
@@ -124,7 +139,23 @@ function truncation(; clamp = (), filter = (), copy = (), keep = (),
         dup = [n for n in unique(names) if count(==(n), names) > 1]
         error("truncation: extra(s) declared more than once: " * join(dup, ", "))
     end
-    TruncationPlan(NamedTuple{Tuple(names)}(Tuple(last.(pairs))), strict)
+    TruncationPlan(NamedTuple{Tuple(names)}(Tuple(last.(pairs))), strict, known_from)
+end
+
+"""
+    known_times(data, plan) -> Vector{Int}
+
+When each individual became known to the study: the start of its sampling
+period, or later if the plan names a `known_from` extra.
+"""
+function known_times(data::EpidemicData, plan::TruncationPlan)
+    f = first.(data.sampling_period)
+    plan.known_from === nothing && return f
+    v = getproperty(getfield(data, :extras), plan.known_from)
+    length(v) == data.n_individuals ||
+        throw(ArgumentError("known_from extra `$(plan.known_from)` needs one time " *
+                            "per individual, got $(length(v))"))
+    max.(f, Int.(v))
 end
 
 """
@@ -149,8 +180,12 @@ end
 
 A copy of `data` containing no information after `cutoff`.
 
-`sampling_period` is clamped for every individual, aggregates are zeroed (they
-are rebuilt by the sampler), and each extra is handled by its declared rule.
+`sampling_period` is truncated on the right for every individual. An individual
+not yet known at the cutoff (see `known_from` in [`truncation`](@ref)) gets an
+empty period; this is deliberate, because clamping it to `(first, first)` would
+leak that future entrant and its first observation into the training fit. Aggregates are
+zeroed (they are rebuilt by the sampler), and each extra is handled by its
+declared rule.
 Undeclared time-shaped extras raise unless the plan was built with
 `strict=false`.
 
@@ -190,7 +225,9 @@ function truncate_data(data::EpidemicData, plan::TruncationPlan, cutoff::Int)
               getproperty(extras, n))
         for n in propertynames(extras))
 
-    sp = [(f, max(min(l, cutoff), f)) for (f, l) in data.sampling_period]
+    known = known_times(data, plan)
+    sp = [known[i] > cutoff ? (f, min(f - 1, cutoff)) : (f, min(l, cutoff))
+          for (i, (f, l)) in enumerate(data.sampling_period)]
 
     return epidemic_data(;
         n_individuals = data.n_individuals,
@@ -204,6 +241,14 @@ function truncate_data(data::EpidemicData, plan::TruncationPlan, cutoff::Int)
         rest_contribution = getfield(data, :rest_contribution),
         sampling_period = sp,
         affected_individuals = data.affected_individuals,
+        # Carry the coupling declaration through. The mask is already the
+        # closure over source states, so listing its true entries rebuilds it
+        # exactly; an all-false mask (a declared uncoupled model) stays
+        # all-false rather than reverting to "assume everything is coupled".
+        coupled_transitions = data.coupled_mask === nothing ? nothing :
+            [(data.state_space[a], data.state_space[b])
+             for a in axes(data.coupled_mask, 1), b in axes(data.coupled_mask, 2)
+             if data.coupled_mask[a, b]],
         state_space = data.state_space,
         group = data.group,
         focal_self_contribution = getfield(data, :focal_self_contribution),

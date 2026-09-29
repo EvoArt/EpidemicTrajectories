@@ -171,6 +171,7 @@ function iffbs_mh_individual!(model, data::EpidemicData, X, i::Int, rng,
                               force::Symbol=:none, on_nonfinite::Symbol=:reject)
     first_t, end_raw = data.sampling_period[i]
     last_t = min(end_raw, data.n_timepoints)
+    first_t <= last_t || return nothing
     n_t = last_t - first_t + 1
     xᵢ = @view X[first_t:last_t, i]
     ds = data.derived_summaries

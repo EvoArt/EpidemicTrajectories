@@ -14,4 +14,7 @@ using Serialization: Serialization
     include("iffbs_mh.jl")
     include("residuals.jl")
 
+    # Exact marginalisation for independent individuals.
+    include("hmm.jl")
+
 end

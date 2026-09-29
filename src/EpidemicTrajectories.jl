@@ -41,6 +41,9 @@ include("data.jl")
 include("transitions.jl")
 include("iffbs.jl")
 include("build.jl")
+# Exact marginalisation for independent individuals: after build.jl, alongside
+# the complete-path likelihood it integrates.
+include("hmm.jl")
 
 # After build.jl: `iffbs_mh.jl` calls `epidemic_conditional_loglik` as a default
 # argument, and its `IFFBSMHSampler` is what `epidemic_latent_sampler(; mh=true)`
@@ -82,6 +85,12 @@ export MHStats, IFFBSMHSampler, acceptance_rate, identical_rate, reset_stats!
 
 # What a model spec generates
 export epidemic_simulator, epidemic_loglik, epidemic_obs_loglik, epidemic_latent_sampler
+
+# Exact marginalisation when individuals are independent given the parameters:
+# the collapsed likelihood, its per-individual terms and filter, posterior path
+# draws, and the independence checks.
+export epidemic_marginal_loglik, hmm_logliks, hmm_filter, hmm_sample!
+export require_independent, check_independent
 
 # Trajectory summaries: residuals and other post-hoc, per-draw, per-individual
 # quantities computed from a sampled `X`. The fourth artefact generated from one

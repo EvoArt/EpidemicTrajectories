@@ -14,6 +14,11 @@ using Serialization: Serialization
     include("iffbs_mh.jl")
     include("residuals.jl")
 
+    # Exact marginalisation for independent individuals; its ExactHMM() LFO
+    # scorer is exercised here too, against path enumeration.
+    include("hmm.jl")
+    include("hmm_reference.jl")
+
     # Leave-future-out cross-validation.
     include("truncate.jl")
     include("lfo.jl")

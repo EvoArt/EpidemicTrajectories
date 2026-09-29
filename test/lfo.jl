@@ -31,9 +31,26 @@ end
     @test cell_of(Joint(), 3, 2) == cell_of(Joint(), 1, 1)      # one bucket, always
     @test cell_of(Pointwise(), 3, 2) == (3, 2)
     @test cell_of(Pointwise(), 3, 2) != cell_of(Pointwise(), 3, 1)
+    @test cell_of(ByIndividual(), 3, 2) == cell_of(ByIndividual(), 3, 1)
+    @test cell_of(ByIndividual(), 3, 2) != cell_of(ByIndividual(), 4, 2)
     @test cell_of(g, 1, 2) == cell_of(g, 2, 2)                  # same group, same step
     @test cell_of(g, 1, 2) != cell_of(g, 3, 2)                  # different group
     @test cell_of(g, 1, 1) != cell_of(g, 1, 2)                  # different step
+end
+
+@testset "animal-history score keeps temporal dependence" begin
+    # One animal survives each interval with probability q. Observing it alive
+    # twice has probability q^2; the two marginal alive probabilities multiply
+    # to q^3. Each posterior draw is a complete future history.
+    q = 0.8
+    S = 100
+    raw = [s <= 64 ? (true, true) : s <= 80 ? (true, false) : (false, false)
+           for s in 1:S]
+    animal = [Dict{Any,Float64}(1 => (a && b ? 0.0 : -Inf)) for (a, b) in raw]
+    steps = [Dict{Any,Float64}((1, 1) => (a ? 0.0 : -Inf),
+                                (1, 2) => (b ? 0.0 : -Inf)) for (a, b) in raw]
+    @test aggregate_cells(zeros(S), animal) ≈ log(q^2)
+    @test aggregate_cells(zeros(S), steps) ≈ log(q^3)
 end
 
 @testset "Joint reproduces an unbucketed scorer to 1e-12" begin
@@ -179,3 +196,131 @@ end
     c = compare(a, b; granularity = :joint)
     @test c.n_windows == 6          # NOT 10 -- a 10-window total vs a 6-window
 end                                 # total is not a comparison
+
+# ---------------------------------------------------------------------------
+# model weights
+# ---------------------------------------------------------------------------
+#
+# The gates that matter here:
+#  * identical models split evenly, and pseudo-BMA is exactly a softmax of the
+#    totals -- both checked against a hand-computed value, not against the
+#    other method.
+#  * stacking actually maximises its own objective, so it must beat both equal
+#    weights and the best single model on the mixture log-score.
+#  * a window where ANY model is non-finite is dropped rather than kept, since
+#    keeping it would let one model's degeneracy set the weights.
+
+"An LFOResult with exactly the per-window scores given."
+function _result_from(scores; cuts = nothing, M = 1, g = :joint)
+    cs = cuts === nothing ? (1:length(scores)) : cuts
+    ws = [WindowResult(c, Dict(g => s), 100, Dict(g => 100), Dict(g => 1),
+                       10, 0.0, 0.0) for (c, s) in zip(cs, scores)]
+    LFOResult(ws, [g], first(cs), M, Dict{Symbol,Any}())
+end
+
+_mixlog(lp, w) = sum(log(sum(w[k] * exp(lp[t, k]) for k in axes(lp, 2)))
+                     for t in axes(lp, 1))
+
+@testset "model_weights: identical models split evenly" begin
+    a = _result_from(fill(-1.0, 8)); b = _result_from(fill(-1.0, 8))
+    for m in (:stacking, :pseudo_bma)
+        r = model_weights(Dict(:a => a, :b => b); granularity = :joint, method = m)
+        @test r.weights ≈ [0.5, 0.5] atol = 1e-6
+    end
+end
+
+@testset "model_weights: pseudo-BMA is a softmax of the totals" begin
+    # totals -3 and -6, so the weights are e^3/(1+e^3) and 1/(1+e^3).
+    r = model_weights(Dict(:a => _result_from(fill(-1.0, 3)),
+                           :b => _result_from(fill(-2.0, 3)));
+                      granularity = :joint, method = :pseudo_bma)
+    want = exp(3) / (1 + exp(3))
+    ia = findfirst(==("a"), r.names)
+    @test r.weights[ia] ≈ want atol = 1e-8
+    @test sum(r.weights) ≈ 1
+end
+
+@testset "model_weights: stacking maximises the mixture score" begin
+    # Alternating experts: each model is far better in half the windows, so a
+    # mixture beats either alone and stacking must keep both.
+    lp = [0.0 -10.0; -10.0 0.0; 0.0 -10.0; -10.0 0.0; 0.0 -9.0]
+    r = model_weights(Dict(:a => _result_from(lp[:, 1]),
+                           :b => _result_from(lp[:, 2]));
+                      granularity = :joint)
+    ia = findfirst(==("a"), r.names)
+    w = ia == 1 ? r.weights : reverse(r.weights)
+    @test minimum(w) > 0.2                        # both experts kept
+    K = size(lp, 2)
+    @test _mixlog(lp, w) >= _mixlog(lp, fill(1 / K, K)) - 1e-8
+    @test _mixlog(lp, w) >= maximum(_mixlog(lp, [i == k ? 1.0 : 0.0 for i in 1:K])
+                                    for k in 1:K) - 1e-8
+
+    # ... where pseudo-BMA, seeing only the totals, collapses onto one.
+    rb = model_weights(Dict(:a => _result_from(lp[:, 1]),
+                            :b => _result_from(lp[:, 2]));
+                       granularity = :joint, method = :pseudo_bma)
+    @test minimum(rb.weights) < 0.05
+end
+
+@testset "model_weights: a uniformly dominated model gets no weight" begin
+    r = model_weights(Dict(:good => _result_from(fill(0.0, 5)),
+                           :bad  => _result_from(fill(-50.0, 5)));
+                      granularity = :joint)
+    @test r.weights[findfirst(==("bad"), r.names)] < 1e-3
+end
+
+@testset "model_weights: non-finite windows are dropped, not hidden" begin
+    r = model_weights(Dict(:a => _result_from([-1.0, -Inf, -1.0]),
+                           :b => _result_from([-2.0, -2.0, -2.0]));
+                      granularity = :joint)
+    @test r.n_dropped == 1
+    @test r.n_windows == 2
+    # every window unusable is an error, not a silent uniform answer
+    @test_throws ArgumentError model_weights(
+        Dict(:a => _result_from([-Inf, -Inf]), :b => _result_from([-1.0, -1.0]));
+        granularity = :joint)
+end
+
+@testset "model_weights: only shared cutoffs, and the usual refusals" begin
+    r = model_weights(Dict(:a => _result_from(fill(-1.0, 3); cuts = [1, 2, 3]),
+                           :b => _result_from(fill(-2.0, 3); cuts = [2, 3, 4]));
+                      granularity = :joint)
+    @test r.n_windows == 2
+
+    @test_throws ArgumentError model_weights(
+        Dict(:a => _result_from([-1.0]), :b => _result_from([-2.0]));
+        granularity = :pointwise)                      # nobody ran it
+    @test_throws ArgumentError model_weights(
+        Dict(:a => _result_from([-1.0])); granularity = :joint)   # one model
+    @test_throws ArgumentError model_weights(
+        Dict(:a => _result_from([-1.0, -1.0]; M = 1),
+             :b => _result_from([-2.0, -2.0]; M = 4));
+        granularity = :joint)                          # different M
+    @test_throws ArgumentError model_weights(
+        Dict(:a => _result_from([-1.0]; cuts = [1]),
+             :b => _result_from([-2.0]; cuts = [99]));
+        granularity = :joint)                          # no shared cutoffs
+    @test_throws ArgumentError model_weights(
+        Dict(:a => _result_from([-1.0]), :b => _result_from([-2.0]));
+        granularity = :joint, method = :nonesuch)
+end
+
+@testset "model_weights: the matrix method matches the LFOResult one" begin
+    # Per-window scores survive a session where an LFOResult does not, so the
+    # matrix method is what a cluster pipeline gathers with. It must agree
+    # exactly with the object method on the same numbers.
+    lp = [0.0 -10.0; -10.0 0.0; 0.0 -10.0; -10.0 0.0; 0.0 -9.0]
+    a = model_weights(Dict(:a => _result_from(lp[:, 1]),
+                           :b => _result_from(lp[:, 2])); granularity = :joint)
+    b = model_weights(lp; names = ["a", "b"])
+    ia = findfirst(==("a"), a.names); ib = findfirst(==("a"), b.names)
+    @test a.weights[ia] ≈ b.weights[ib] atol = 1e-8
+    @test b.n_windows == 5 && b.n_dropped == 0
+
+    # and it drops non-finite rows the same way
+    c = model_weights([0.0 -1.0; -Inf -1.0; 0.0 -1.0]; names = ["a", "b"])
+    @test c.n_dropped == 1 && c.n_windows == 2
+
+    @test_throws ArgumentError model_weights(reshape([1.0, 2.0], 2, 1))
+    @test_throws ArgumentError model_weights(lp; names = ["only_one"])
+end

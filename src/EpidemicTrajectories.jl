@@ -43,6 +43,10 @@ include("data.jl")
 include("transitions.jl")
 include("iffbs.jl")
 include("build.jl")
+# Exact marginalisation for independent individuals: after build.jl, alongside
+# the complete-path likelihood it integrates.
+include("hmm.jl")
+include("hmm_reference.jl")
 
 # After build.jl: `iffbs_mh.jl` calls `epidemic_conditional_loglik` as a default
 # argument, and its `IFFBSMHSampler` is what `epidemic_latent_sampler(; mh=true)`
@@ -96,6 +100,15 @@ export MHStats, IFFBSMHSampler, acceptance_rate, identical_rate, reset_stats!
 # What a model spec generates
 export epidemic_simulator, epidemic_loglik, epidemic_obs_loglik, epidemic_latent_sampler
 
+# Exact marginalisation when individuals are independent given the parameters:
+# the collapsed likelihood, its per-individual terms and filter, posterior path
+# draws, the exact forecast density, and the independence checks.
+export epidemic_marginal_loglik, hmm_logliks, hmm_filter, hmm_sample!
+export hmm_forecast_logliks, require_independent, check_independent
+# The same for a coupled model, by enumerating the joint state: tiny
+# populations only, as an absolute reference for estimators.
+export joint_reference, joint_sample
+
 # Trajectory summaries: residuals and other post-hoc, per-draw, per-individual
 # quantities computed from a sampled `X`. The fourth artefact generated from one
 # model spec: the one that says whether the fit was any good. See residuals.jl.
@@ -124,11 +137,13 @@ export pvalue_plot, pvalue_plot!, residual_panel
 # Leave-future-out cross-validation: declared truncation of the data, the
 # granularity axis the score is aggregated over, the per-window score, the
 # driver, PSIS smoothing, the execution backends, and the adaptation diagnostic.
-export truncation, truncate_data, lfo_cutoffs, TruncationPlan, TruncationRule
-export Granularity, Joint, Pointwise, ByGroup, cell_of, aggregate_cells
+export truncation, truncate_data, lfo_cutoffs, TruncationPlan, TruncationRule, known_times
+export Granularity, Joint, ByIndividual, Pointwise, ByGroup, cell_of, aggregate_cells
 export LFOResult, WindowResult, elpd, compare, cutoffs, n_informative
+export cell_scores, cell_elpd
+export model_weights
 export forward_simulate, score_window, survival_constrained
-export LFOSpec, lfo_cv
+export LFOSpec, lfo_cv, LFOScorer, ForwardSimulation, ExactHMM
 export psis_smooth, psis_ess
 export LocalBackend, SlurmArray, SweepHandle, sweep_status, work_item, write_sbatch
 export resubmit, collect_sweep

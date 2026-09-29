@@ -179,9 +179,8 @@ end
 #     globals   : 0.6114 s, 164,109,040 bytes allocated
 #     arguments : 0.0032 s,         224 bytes allocated   -> 189x
 #
-# This block was 11.7% of a sweep (0.541 s) purely from that. Exactly the trap
-# CLAUDE.md's performance section describes — `data.season` reports the right
-# type either way, so only a benchmark reveals it.
+# This block was 11.7% of a sweep (0.541 s) purely from that. `data.season`
+# reports the right type either way, so only a benchmark reveals it.
 #
 # The count loop is ALSO restructured: season is a function of `t` alone, so one
 # pass over (i, t) can bucket straight into caught[season[t]] / available[season[t]],
@@ -490,7 +489,7 @@ function run_badger_fit(n_sweeps; n_burn=0, seed=13)
     t0 = time()
     chn = AbstractMCMC.sample(StableRNG(seed), m, spl, n_sweeps;
                               init=init, adtype=ADTYPE, n_adapts=0, discard_initial=n_burn,
-                              save_states=(X=x_disp,))
+                              save_states=(X=:buffer,))
     elapsed = time() - t0
     println("done in ", round(elapsed / 60, digits=1), " min (", round(elapsed, digits=1), " s)")
     chn, elapsed

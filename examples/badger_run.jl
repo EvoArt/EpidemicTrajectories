@@ -338,6 +338,10 @@ init = (; X=X0, tau=5.0, alpha=fill(0.001, G), lambda=0.01, beta=0.01, q=0.5,
 
 m = badger(data, data.n_timepoints, data.n_individuals, G, NT, NS, NNU, loglik, obs_loglik)
 
+# Guard so profiling scripts can `include` this file (ENV["BADGER_RUN"]="0") to reuse
+# data/model construction above without paying for the full 1000-sweep fit.
+if get(ENV, "BADGER_RUN", "1") == "1"
+
 println("Badger fit: $(data.n_individuals) badgers x $(data.n_timepoints) t, $G groups, ",
         "$N_SWEEPS sweeps ($N_ADAPT adapt)")
 t0 = time()
@@ -392,3 +396,5 @@ csv_path = joinpath(outdir, "badger-fit-$stamp.csv")
 JLD2.@save jld2_path chn elapsed
 CSV.write(csv_path, df)
 println("\nsaved:\n  $jld2_path\n  $csv_path")
+
+end # BADGER_RUN

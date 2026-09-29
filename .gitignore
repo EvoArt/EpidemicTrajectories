@@ -66,3 +66,10 @@ PERF_REPORT_*.md
 desired_api.jl
 walkthrough_cattle.jl
 walkthrough_cattle_check.jl
+
+# Local only: the badger data and its runner, papers, notes and scratch output
+/for_lfo/
+/*.pdf
+/hmm_gradient_plan.md
+/read_log.py
+/examples/residuals_out/

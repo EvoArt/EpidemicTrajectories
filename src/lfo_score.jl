@@ -407,6 +407,109 @@ function survival_constrained(known_present)
     (constrain, survival_weight)
 end
 
+"""
+    iffbs_present!(model, data, X, i, rng; absorbing=_absorbing_state(data)) -> Float64
+
+Resample individual `i`'s trajectory from its exact conditional given the
+parameters, the observations and every other trajectory, restricted to paths
+that are out of the absorbing state at the end of `i`'s sampling period.
+Returns the log probability of that event under the unrestricted conditional,
+which is the importance weight the restriction costs.
+
+The forward filter is the one [`iffbs_individual!`](@ref) runs. Its last row is
+the conditional distribution of the final state, so the probability of being
+present is read off it before the absorbing entry is zeroed and the backward
+pass started from what is left. If the event has probability zero the
+trajectory is left as it was and `-Inf` is returned.
+
+The weight is exact only for the exact conditional: with a filter that is a
+proposal for some other chain (see [`iffbs_proposal`](@ref)) the last row is
+not the probability of the event.
+"""
+function iffbs_present!(model, data::EpidemicData, X, i, rng;
+                        absorbing = _absorbing_state(data))
+    absorbing === nothing && throw(ArgumentError("the model has no absorbing state"))
+    start_sampling, end_sampling = data.sampling_period[i]
+    start_sampling <= min(end_sampling, data.n_timepoints) || throw(ArgumentError(
+        "individual $i has an empty sampling period"))
+    xᵢ = @view X[start_sampling:end_sampling, i]
+    n_t = length(xᵢ)
+
+    @inbounds for t in start_sampling:end_sampling
+        apply_summaries!(data.derived_summaries, model, data, X, X[t, i], i, t, true)
+    end
+
+    data._focal[] = i
+    probs, trans_cache = forward_filter(xᵢ, start_sampling, end_sampling, model, data, X, i)
+    p = 0.0
+    @inbounds for s in 1:data.n_states
+        s == absorbing || (p += probs[n_t, s])
+    end
+    if p > 0
+        @inbounds for s in 1:data.n_states
+            probs[n_t, s] = s == absorbing ? 0.0 : probs[n_t, s] / p
+        end
+        backward_sample!(probs, trans_cache, xᵢ, start_sampling, end_sampling, model,
+                         data, X, i, rng)
+    end
+    data._focal[] = -1
+
+    @inbounds for t in start_sampling:end_sampling
+        apply_summaries!(data.derived_summaries, model, data, X, X[t, i], i, t, false)
+    end
+    p > 0 ? log(p) : -Inf
+end
+
+"""
+    condition_present!(rng, model, data, X, ids) -> Float64
+
+Move a posterior draw's trajectories `X` onto the event that every individual
+in `ids` is out of the absorbing state at the end of its sampling period, and
+return the log importance weight of the move.
+
+A forward simulation from a draw in which one of those individuals is already
+dead scores zero, however the forecast is constrained, and with many
+individuals almost every draw has one. Here each is redrawn in turn by
+[`iffbs_present!`](@ref), conditioning on the others as they then stand, and
+the log probabilities of the events are summed. The weighted draws then
+represent the posterior restricted to the event and *not* renormalised:
+averaging `exp(logw) * f(X)` over posterior draws estimates the integral of `f`
+over the event, and `f = 1` gives the event's posterior probability. Nothing is
+self-normalised, so that probability is kept in the estimate, which is what a
+predictive density needs.
+
+The weight is not the density ratio of the final trajectories on their own,
+whose proposal sums over the trajectories that were replaced. It is the ratio
+on the pair (replaced, replacement), with the unrestricted conditional as the
+backward kernel of a Gibbs-type move (Del Moral, Doucet & Jasra 2006,
+section 3.3.2.2).
+
+`data` must be the training data the draw was fitted to: with later
+observations in it the filter would condition on them and the weight would be
+the wrong one. `X` is modified in place; the parameters are not moved.
+"""
+function condition_present!(rng::AbstractRNG, model, data::EpidemicData, X, ids)
+    absorbing = _absorbing_state(data)
+    reset_aggregates!(data)
+    apply_derived_summaries!(model, data, X)
+    logw = 0.0
+    for i in ids
+        logw += iffbs_present!(model, data, X, i, rng; absorbing)
+        isfinite(logw) || break
+    end
+    logw
+end
+
+# The individuals a survival constraint holds present from the first step of
+# the window at `t_star`: those it would stop a forecast from killing there.
+function _present_at_cutoff(constrain, data::EpidemicData, known, t_star::Int, M::Int)
+    c = _windowed(constrain)
+    last_t = min(t_star + M, data.n_timepoints)
+    [i for i in 1:data.n_individuals
+       if known[i] <= t_star && data.sampling_period[i][2] > t_star &&
+          c(i, t_star + 1, last_t)]
+end
+
 # A constraint as a function of (i, t, last_t), whichever form it was written
 # in. Decided once, not per call: this sits in the simulation's inner loop.
 _windowed(f) = hasmethod(f, Tuple{Int,Int,Int}) ? f : ((i, t, last_t) -> f(i, t))

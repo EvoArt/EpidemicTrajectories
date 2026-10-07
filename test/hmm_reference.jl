@@ -94,3 +94,81 @@ end
     @test all(all(joint_sample(rng, th, d, t_star; alive = [2, 3])[t_star, [2, 3]] .!= 3)
               for _ in 1:200)
 end
+
+@testset "conditioning a draw on presence at the cutoff: exact weights" begin
+    th = (; _TC..., b = 0.6)
+    # 2 and 3 are positive and then go unseen for three and two steps before the
+    # cutoff, while 1 is seen negative throughout and converts at step 4. Its
+    # conversion probability depends on how many positives are alive, so whether
+    # and when 2 and 3 died changes the likelihood of 1's path: their chances
+    # of being alive at the cutoff depend on each other's trajectories.
+    y = [1  2  2;
+         1  0  2;
+         1  0  0;
+         2  0  0;
+         0  2  0;
+         2  0  2]
+    d = _coupled(y; group = ones(Int, 3))
+    t_star, M = 4, 2
+    # everyone is caught in the window, so it implies all three were alive at 4
+    ref = joint_reference(th, d, t_star, M; alive = [1, 2, 3])
+    plan = truncation(keep = (:y,))
+    train = truncate_data(d, plan, t_star)
+
+    # exact posterior draws, so nothing but the weights is being tested
+    rng = StableRNG(11)
+    n = 20_000
+    Xs = joint_sample(rng, th, d, t_star, n)
+    w = zeros(n)
+    hits = Dict{Vector{Int},Float64}()
+    for s in 1:n
+        X = copy(Xs[s])
+        w[s] = exp(condition_present!(rng, th, train, X, [1, 2, 3]))
+        @test all(X[t_star, :] .!= 3)
+        x = X[t_star, :]
+        hits[x] = get(hits, x, 0.0) + w[s]
+    end
+    # the weight depends on the draw
+    @test std(w) > 0.1 * mean(w)
+    # its mean is the event's posterior probability
+    pA = exp(ref.log_pA)
+    @test abs(mean(w) - pA) < 4.5 * std(w) / sqrt(n)
+    # and the weighted draws carry the restricted, unnormalised distribution
+    for (x, p) in zip(ref.states, ref.filtered_A)
+        p > 0.02 || continue
+        @test get(hits, x, 0.0) / n ≈ pA * p rtol = 0.08
+    end
+    # counting the draws already in the event estimates the same probability
+    # from far fewer of them
+    inA = [all(X[t_star, :] .!= 3) for X in Xs]
+    @test abs(mean(inA) - pA) < 4.5 * sqrt(pA * (1 - pA) / n)
+    @test std(w) < std(inA)
+
+    # through the driver: the window's predictive density at fixed parameters
+    kp = (i, t, last_t) -> any(>(0), @view d.y[t:last_t, i])
+    con, sw = survival_constrained(kp)
+    fit = (tr, cutoff) -> ([th for _ in 1:n], Xs)
+    logobs = (m, data, X, i, t) -> log(data.observation_weight(m, data, X, i, t, X[t, i]))
+    spec = LFOSpec(; fit, cell_logdensity = logobs, plan, constrain = con,
+                   survival_weight = sw, condition_cutoff = true)
+    res = lfo_cv(spec, d; L = t_star, M, cutoffs = [t_star], granularity = Joint(),
+                 verbose = false)
+    @test elpd(res, :joint) ≈ ref.logp atol = 0.03
+    @test res.windows[1].n_finite[:joint] == n
+
+    # the constraint alone is right too, but only on the draws already in the event
+    plain = LFOSpec(; fit, cell_logdensity = logobs, plan, constrain = con,
+                    survival_weight = sw)
+    rp = lfo_cv(plain, d; L = t_star, M, cutoffs = [t_star], granularity = Joint(),
+                verbose = false)
+    @test elpd(rp, :joint) ≈ ref.logp atol = 0.1
+    @test rp.windows[1].n_finite[:joint] == count(inA)
+    @test count(inA) < n ÷ 2
+
+    # it needs the constraint, and only the joint score is valid
+    @test_throws ArgumentError lfo_cv(
+        LFOSpec(; fit, cell_logdensity = logobs, plan, condition_cutoff = true),
+        d; L = t_star, M, cutoffs = [t_star], granularity = Joint(), verbose = false)
+    @test_throws ArgumentError lfo_cv(spec, d; L = t_star, M, cutoffs = [t_star],
+                                      granularity = Pointwise(), verbose = false)
+end

@@ -75,6 +75,11 @@ Everything `lfo_cv` needs from a model.
 - `guide`: simulate from the observation-guided proposal, with its weights
   (see [`forward_simulate`](@ref)). Not with `constrain`. For a coupled model,
   `Joint()` only.
+- `condition_cutoff`: with `constrain`, also move each draw onto the event that
+  the individuals it holds present in the window were present at the cutoff,
+  carrying the weight of the move (see [`condition_present!`](@ref)). The
+  constraint alone cannot use a draw in which one of them is already dead.
+  `Joint()` only: the weight belongs to the whole population's history.
 """
 Base.@kwdef struct LFOSpec{F,C,I,K,W,SC<:LFOScorer}
     fit::F
@@ -88,6 +93,7 @@ Base.@kwdef struct LFOSpec{F,C,I,K,W,SC<:LFOScorer}
     scorer::SC = ForwardSimulation()
     entrants::Bool = true
     guide::Bool = false
+    condition_cutoff::Bool = false
 end
 
 # A fit returns `(draws, X_draws)` or `draws` alone.
@@ -132,6 +138,14 @@ function _check_scorer(spec::LFOSpec, data::EpidemicData, grans, M::Int)
         if spec.guide && !_independent(data) && any(g -> !(g isa Joint), grans)
             throw(ArgumentError("the observation-guided proposal on a coupled " *
                                 "model gives a valid estimate only for Joint()"))
+        end
+        if spec.condition_cutoff
+            spec.constrain === nothing && throw(ArgumentError(
+                "`condition_cutoff` conditions on the individuals `constrain` " *
+                "holds present; build both from `survival_constrained(...)`."))
+            all(g -> g isa Joint, grans) || throw(ArgumentError(
+                "`condition_cutoff` weights a draw's whole history, so it gives " *
+                "a valid estimate only for Joint()"))
         end
     end
     nothing
@@ -252,11 +266,23 @@ function lfo_cv(spec::LFOSpec, data::EpidemicData;
             length(X_draws) == S ||
                 throw(ArgumentError("$S parameter draws but $(length(X_draws)) trajectories"))
             n_inf = spec.is_informative === nothing ? nothing : 0
+            present = spec.condition_cutoff ?
+                _present_at_cutoff(spec.constrain, data, known, t, M) : Int[]
             for s in 1:S
+                X = X_draws[s]
+                lw = 0.0
+                if spec.condition_cutoff
+                    # Its own stream, so the forecast below draws the same
+                    # numbers whether or not the history was conditioned.
+                    X = copy(X)
+                    lw = condition_present!(
+                        StableRNG_or_default(spec.seed + 1000 * s + t + 500_000_000),
+                        draws[s], train, X, present)
+                end
                 for (g, gname) in zip(grans, gnames)
                     # same seed for every granularity => identical trajectories.
                     rng = StableRNG_or_default(spec.seed + 1000 * s + t)
-                    cells, ni = score_window(draws[s], data, X_draws[s], t, M, g;
+                    cells, ni = score_window(draws[s], data, X, t, M, g;
                                              cell_logdensity = spec.cell_logdensity,
                                              is_informative = spec.is_informative,
                                              n_sim = spec.n_sim, rng = rng,
@@ -264,6 +290,10 @@ function lfo_cv(spec::LFOSpec, data::EpidemicData;
                                              survival_weight = spec.survival_weight,
                                              known = known, entrants = spec.entrants,
                                              guide = spec.guide)
+                    if spec.condition_cutoff
+                        k = cell_of(g, 1, 1)
+                        cells[k] = get(cells, k, 0.0) + lw
+                    end
                     cell_lp[gname][s] = cells
                     s == 1 && gname === first(gnames) && n_inf !== nothing && (n_inf = ni)
                 end

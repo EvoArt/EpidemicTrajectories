@@ -225,11 +225,25 @@ end
                 :resampled    => terms(guide = false, resample = true,  n_sim = 16),
                 :guided       => terms(guide = true,  resample = false, n_sim = 16),
                 :guided_resampled => terms(guide = true, resample = true, n_sim = 16))
+    # resampling after every step, whatever the weights, so that path is run
+    always = zeros(n)
+    for s in 1:n
+        reset_aggregates!(d)
+        apply_derived_summaries!(th, d, Xc[s])
+        always[s] = lc[s] + score_window_resampled(th, d, Xc[s], t_star, M;
+                                                   cell_logdensity = logobs, n_particles = 16,
+                                                   rng = StableRNG(2000 + s), constrain = con,
+                                                   ess_threshold = 1.1)
+    end
+    arms[:always_resampled] = always
     for (name, x) in arms
         @test all(isfinite, x)
         @test abs(lme(x) - ref.logp) < 4.5 * se(x) + 1e-3
     end
     @test std(arms[:resampled]) <= std(arms[:plain])
+    @test EpidemicTrajectories._systematic_resample(StableRNG(1), [0.0, 1.0, 0.0]) == [2, 2, 2]
+    idx = EpidemicTrajectories._systematic_resample(StableRNG(1), fill(0.25, 4))
+    @test sort(idx) == 1:4
 
     # through the driver, with the guided proposal standing in for the constraint
     fit = (tr, cutoff) -> ([th for _ in 1:n], Xs)

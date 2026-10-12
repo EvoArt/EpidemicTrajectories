@@ -274,7 +274,7 @@ end
 function _systematic_resample(rng, w)
     n = length(w)
     c = cumsum(w ./ sum(w))
-    u = (rand(rng) + (0:(n - 1))) ./ n
+    u = (rand(rng) .+ (0:(n - 1))) ./ n
     idx = Vector{Int}(undef, n)
     j = 1
     for k in 1:n

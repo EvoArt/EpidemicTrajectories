@@ -73,8 +73,13 @@ Everything `lfo_cv` needs from a model.
   the forecast (see [`forward_simulate`](@ref)). `false` fixes the forecast
   population at the cutoff. Simulation only.
 - `guide`: simulate from the observation-guided proposal, with its weights
-  (see [`forward_simulate`](@ref)). Not with `constrain`. For a coupled model,
-  `Joint()` only.
+  (see [`forward_simulate`](@ref)). For a coupled model, `Joint()` only. Not
+  with `constrain`, except to say whom `condition_cutoff` holds present: the
+  guided proposal already never kills an individual whose own later
+  observations need it alive, so it replaces the constraint in the window.
+- `resample`: treat the `n_sim` trajectories of each draw as particles and
+  resample them between the window's timepoints (see
+  [`score_window_resampled`](@ref)). `Joint()` only.
 - `condition_cutoff`: with `constrain`, also move each draw onto the event that
   the individuals it holds present in the window were present at the cutoff,
   carrying the weight of the move (see [`condition_present!`](@ref)). The
@@ -94,6 +99,7 @@ Base.@kwdef struct LFOSpec{F,C,I,K,W,SC<:LFOScorer}
     entrants::Bool = true
     guide::Bool = false
     condition_cutoff::Bool = false
+    resample::Bool = false
 end
 
 # A fit returns `(draws, X_draws)` or `draws` alone.
@@ -112,6 +118,8 @@ function _check_scorer(spec::LFOSpec, data::EpidemicData, grans, M::Int)
             "ExactHMM() integrates the future exactly; `n_sim` does not apply."))
         spec.guide && throw(ArgumentError(
             "ExactHMM() has no forward proposal to guide; drop `guide`."))
+        spec.resample && throw(ArgumentError(
+            "ExactHMM() simulates nothing to resample; drop `resample`."))
         spec.cell_logdensity === nothing || throw(ArgumentError(
             "ExactHMM() scores with the model's own observation process; drop " *
             "`cell_logdensity` so there is only one observation model."))
@@ -131,8 +139,15 @@ function _check_scorer(spec::LFOSpec, data::EpidemicData, grans, M::Int)
     else
         spec.cell_logdensity === nothing && throw(ArgumentError(
             "ForwardSimulation() needs a `cell_logdensity`."))
-        spec.guide && spec.constrain !== nothing && throw(ArgumentError(
-            "use the observation-guided proposal or the survival constraint, not both"))
+        spec.guide && spec.constrain !== nothing && !spec.condition_cutoff &&
+            throw(ArgumentError("use the observation-guided proposal or the " *
+                                "survival constraint, not both"))
+        if spec.resample
+            all(g -> g isa Joint, grans) || throw(ArgumentError(
+                "`resample` acts on the whole population, so it estimates only Joint()"))
+            spec.n_sim >= 2 || throw(ArgumentError(
+                "`resample` needs n_sim >= 2 particles"))
+        end
         # A guided move of one individual changes another's dynamics when they
         # are coupled, so only the product of every weight corrects a density.
         if spec.guide && !_independent(data) && any(g -> !(g isa Joint), grans)
@@ -172,6 +187,9 @@ different trajectories and the difference would no longer be attributable to the
 granularity.
 
 # Scoring
+With `Joint()` among the granularities, `meta[:draw_ess]` holds, per cutoff,
+how many draws effectively carry the joint score.
+
 `spec.scorer` chooses how each draw's predictive density is computed (see
 [`LFOScorer`](@ref)); the granularity chooses where the log is taken. The two
 are independent, except that `ExactHMM()` scores whole forecast blocks and so,
@@ -240,6 +258,7 @@ function lfo_cv(spec::LFOSpec, data::EpidemicData;
     known = known_times(data, spec.plan)
     windows = WindowResult[]
     samplers = Dict{Int,Any}()
+    draw_ess = Dict{Int,Float64}()
     for t in ts
         train = truncate_data(data, spec.plan, t)
 
@@ -286,10 +305,11 @@ function lfo_cv(spec::LFOSpec, data::EpidemicData;
                                              cell_logdensity = spec.cell_logdensity,
                                              is_informative = spec.is_informative,
                                              n_sim = spec.n_sim, rng = rng,
-                                             constrain = spec.constrain,
-                                             survival_weight = spec.survival_weight,
+                                             constrain = spec.guide ? nothing : spec.constrain,
+                                             survival_weight = spec.guide ? nothing :
+                                                               spec.survival_weight,
                                              known = known, entrants = spec.entrants,
-                                             guide = spec.guide)
+                                             guide = spec.guide, resample = spec.resample)
                     if spec.condition_cutoff
                         k = cell_of(g, 1, 1)
                         cells[k] = get(cells, k, 0.0) + lw
@@ -307,6 +327,7 @@ function lfo_cv(spec::LFOSpec, data::EpidemicData;
                     for g in gnames)
         ncell = Dict(g => length(cells[g]) for g in gnames)
         support = Dict(g => _cell_support(cell_lp[g]) for g in gnames)
+        :joint in gnames && (draw_ess[t] = _draw_ess(cell_lp[:joint]))
         score_secs = time() - t_score
 
         push!(windows, WindowResult(t, elpds, S, nfin, ncell, n_inf,
@@ -318,7 +339,7 @@ function lfo_cv(spec::LFOSpec, data::EpidemicData;
                     Dict{Symbol,Any}(:n_sim => spec.scorer isa ExactHMM ? nothing : spec.n_sim,
                                      :scorer => _scorer_name(spec.scorer),
                                      :stride => stride, :cache => cache,
-                                     :sampler => samplers))
+                                     :sampler => samplers, :draw_ess => draw_ess))
 
     # A worker writes its one window where `sweep_status` looks for it. Existence
     # of this file is what marks the item done -- never a progress log, which is
@@ -455,6 +476,17 @@ function _score_exact!(cell_lp, spec::LFOSpec, data::EpidemicData, draws, t::Int
         spec.is_informative(data, i, u) && (n += 1)
     end
     n
+end
+
+# How many draws effectively carry a joint window score, (sum w)^2 / sum w^2
+# over the per-draw densities. Every draw being finite says nothing about this:
+# when one draw's density is many nats above the rest, the average is that draw.
+function _draw_ess(cell_lp::AbstractVector{<:AbstractDict})
+    lp = [sum(values(d); init = 0.0) for d in cell_lp]
+    m = maximum(lp)
+    isfinite(m) || return 0.0
+    w = exp.(lp .- m)
+    sum(w)^2 / sum(abs2, w)
 end
 
 function _report_window(w::WindowResult, gnames)

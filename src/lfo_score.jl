@@ -59,98 +59,229 @@ function forward_simulate(rng::AbstractRNG, model, data::EpidemicData, X,
         _drop_unknown!(model, data, Xf, t_star, known; entrants)
     end
     last_t = min(t_star + M, data.n_timepoints)
-    N = data.n_states
-    P = zeros(Float64, N, N)
-    rowsum = zeros(Float64, N)
-    row = zeros(Float64, N)
-    absorbing = _absorbing_state(data)
     constrain === nothing || (constrain = _windowed(constrain))
-    if guide
-        beta, bnext, gw = zeros(N), zeros(N), zeros(N)
-        P2, rowsum2 = zeros(Float64, N, N), zeros(Float64, N)
-    end
-
+    buf = _step_buffers(data, guide)
     for t in (t_star + 1):last_t
-        prev = copy(view(Xf, t - 1, :))
-        for i in 1:data.n_individuals
-            f_i, l_i = data.sampling_period[i]
-            (f_i <= t <= min(l_i, data.n_timepoints)) || continue
-            f_i <= t_star < known[i] && continue
-            !entrants && f_i > t_star && continue
-            # An individual entering after the cutoff has no valid state at
-            # `t-1`. Draw its state at entry from the declared initial
-            # distribution; advancing the stale pre-entry cell would leak an
-            # arbitrary placeholder into the forecast.
-            if f_i > t_star && t == f_i
-                p0 = data.starting_state(model, data, Xf, i, t)
-                k = _sample_categorical(rng, p0)
-                old = Xf[t, i]
-                apply_summaries!(data.derived_summaries, model, data, Xf,
-                                 old, i, t, true)
-                Xf[t, i] = k
-                apply_summaries!(data.derived_summaries, model, data, Xf,
-                                 k, i, t, false)
-                continue
-            end
-            # An absorbing state stays absorbing: it must not be re-randomised,
-            # and the constraint below must not resurrect it.
-            if absorbing !== nothing && prev[i] == absorbing
-                old = Xf[t, i]
-                apply_summaries!(data.derived_summaries, model, data, Xf,
-                                 old, i, t, true)
-                Xf[t, i] = absorbing
-                apply_summaries!(data.derived_summaries, model, data, Xf,
-                                 absorbing, i, t, false)
-                continue
-            end
-            transition_matrix_at!(P, rowsum, data.trans_mat, model, data, Xf, i, t - 1)
-            @inbounds for s in 1:N
-                row[s] = Float64(P[prev[i], s])
-            end
-            if known[i] <= t_star && constrain !== nothing && absorbing !== nothing &&
-                    constrain(i, t, last_t)
-                p_surv = 1.0 - row[absorbing]
-                p_surv = max(p_surv, 1e-12)
-                @inbounds for s in 1:N
-                    row[s] = s == absorbing ? 0.0 : row[s] / p_surv
-                end
-            end
-            lw = 0.0
-            if guide && known[i] <= t_star
-                # Draw in proportion to the move's probability times how likely
-                # the individual's own remaining observations in the window are
-                # from each state, and record p/q = Z / beta[k].
-                _lookahead!(beta, bnext, gw, P2, rowsum2, model, data, Xf, i, t,
-                            min(last_t, l_i, data.n_timepoints))
-                Z = 0.0
-                @inbounds for s in 1:N
-                    Z += row[s] * beta[s]
-                end
-                if Z > 0
-                    @inbounds for s in 1:N
-                        row[s] = row[s] * beta[s] / Z
-                    end
-                else
-                    lw = -Inf        # no state explains the window: h = 0
-                end
-            end
-            u = rand(rng); c = 0.0; k = N
-            @inbounds for s in 1:N
-                c += row[s]
-                if u <= c; k = s; break; end
-            end
-            if guide && known[i] <= t_star
-                logw[t, i] = isfinite(lw) ? log(Z) - log(beta[k]) : -Inf
-            end
+        _forward_step!(rng, model, data, Xf, t, t_star, last_t, known, entrants,
+                       constrain, guide, logw, nothing, buf)
+    end
+    Xf
+end
+
+function _step_buffers(data::EpidemicData, guide::Bool)
+    N = data.n_states
+    (; P = zeros(Float64, N, N), rowsum = zeros(Float64, N), row = zeros(Float64, N),
+       absorbing = _absorbing_state(data),
+       beta = guide ? zeros(N) : nothing, bnext = guide ? zeros(N) : nothing,
+       gw = guide ? zeros(N) : nothing, P2 = guide ? zeros(Float64, N, N) : nothing,
+       rowsum2 = guide ? zeros(Float64, N) : nothing)
+end
+
+# One step of `forward_simulate`: every individual's state at `t` from the
+# population at `t-1`. `logw[t, i]` receives the guided proposal's weight and,
+# when `survw` is given, `survw[t, i]` the log survival probability a constrained
+# move gave up -- the step's share of the weight `survival_constrained` returns.
+function _forward_step!(rng, model, data::EpidemicData, Xf, t, t_star, last_t, known,
+                        entrants, constrain, guide, logw, survw, buf)
+    (; P, rowsum, row, absorbing, beta, bnext, gw, P2, rowsum2) = buf
+    N = data.n_states
+    prev = copy(view(Xf, t - 1, :))
+    for i in 1:data.n_individuals
+        f_i, l_i = data.sampling_period[i]
+        (f_i <= t <= min(l_i, data.n_timepoints)) || continue
+        f_i <= t_star < known[i] && continue
+        !entrants && f_i > t_star && continue
+        # An individual entering after the cutoff has no valid state at
+        # `t-1`. Draw its state at entry from the declared initial
+        # distribution; advancing the stale pre-entry cell would leak an
+        # arbitrary placeholder into the forecast.
+        if f_i > t_star && t == f_i
+            p0 = data.starting_state(model, data, Xf, i, t)
+            k = _sample_categorical(rng, p0)
             old = Xf[t, i]
             apply_summaries!(data.derived_summaries, model, data, Xf,
                              old, i, t, true)
             Xf[t, i] = k
             apply_summaries!(data.derived_summaries, model, data, Xf,
                              k, i, t, false)
+            continue
+        end
+        # An absorbing state stays absorbing: it must not be re-randomised,
+        # and the constraint below must not resurrect it.
+        if absorbing !== nothing && prev[i] == absorbing
+            old = Xf[t, i]
+            apply_summaries!(data.derived_summaries, model, data, Xf,
+                             old, i, t, true)
+            Xf[t, i] = absorbing
+            apply_summaries!(data.derived_summaries, model, data, Xf,
+                             absorbing, i, t, false)
+            continue
+        end
+        transition_matrix_at!(P, rowsum, data.trans_mat, model, data, Xf, i, t - 1)
+        @inbounds for s in 1:N
+            row[s] = Float64(P[prev[i], s])
+        end
+        if known[i] <= t_star && constrain !== nothing && absorbing !== nothing &&
+                constrain(i, t, last_t)
+            p_surv = 1.0 - row[absorbing]
+            p_surv = max(p_surv, 1e-12)
+            survw === nothing || (survw[t, i] = log(p_surv))
+            @inbounds for s in 1:N
+                row[s] = s == absorbing ? 0.0 : row[s] / p_surv
+            end
+        end
+        lw = 0.0
+        Z = 1.0
+        if guide && known[i] <= t_star
+            # Draw in proportion to the move's probability times how likely
+            # the individual's own remaining observations in the window are
+            # from each state, and record p/q = Z / beta[k].
+            _lookahead!(beta, bnext, gw, P2, rowsum2, model, data, Xf, i, t,
+                        min(last_t, l_i, data.n_timepoints))
+            Z = 0.0
+            @inbounds for s in 1:N
+                Z += row[s] * beta[s]
+            end
+            if Z > 0
+                @inbounds for s in 1:N
+                    row[s] = row[s] * beta[s] / Z
+                end
+            else
+                lw = -Inf        # no state explains the window: h = 0
+            end
+        end
+        u = rand(rng); c = 0.0; k = N
+        @inbounds for s in 1:N
+            c += row[s]
+            if u <= c; k = s; break; end
+        end
+        if guide && known[i] <= t_star
+            logw[t, i] = isfinite(lw) ? log(Z) - log(beta[k]) : -Inf
+        end
+        old = Xf[t, i]
+        apply_summaries!(data.derived_summaries, model, data, Xf,
+                         old, i, t, true)
+        Xf[t, i] = k
+        apply_summaries!(data.derived_summaries, model, data, Xf,
+                         k, i, t, false)
+    end
+    nothing
+end
+
+"""
+    score_window_resampled(model, data, X, t_star, M; cell_logdensity, n_particles,
+                           rng, constrain=nothing, known=nothing, entrants=true,
+                           guide=false, ess_threshold=0.5) -> Float64
+
+The log joint predictive density of one window from one draw, estimated by a
+particle filter over the window's timepoints instead of by independent forward
+trajectories.
+
+`n_particles` copies of the population are simulated forward one timepoint at a
+time. After each step every copy is weighted by the density of that step's
+observations under it (times its proposal weights: the survival constraint's,
+or the guided proposal's), and when the effective number of copies falls below
+`ess_threshold * n_particles` they are resampled in proportion to their
+weights. The product over steps of the weighted mean increments is an unbiased
+estimate of the window's density (Del Moral 2004), as the average over
+independent trajectories is, but copies that disagree with an early step are
+dropped there instead of being carried to the end of the window. With many
+individuals that matters: one trajectory's density is a product over all of
+them, so independent trajectories differ by many nats and the average is
+carried by whichever came closest.
+
+Only the joint density over the cohort is estimated -- resampling acts on the
+whole population, so no cell finer than the window has a weight of its own.
+`constrain` takes the matching survival weight step by step, so it is gated on
+the same condition by construction.
+
+Every copy starts from `X`, whose aggregates the caller must have built (as
+`score_window` does).
+"""
+function score_window_resampled(model, data::EpidemicData, X, t_star::Int, M::Int;
+                                cell_logdensity, n_particles::Int,
+                                rng::AbstractRNG = Random.default_rng(),
+                                constrain = nothing, known = nothing,
+                                entrants::Bool = true, guide::Bool = false,
+                                ess_threshold::Real = 0.5)
+    guide && constrain !== nothing && throw(ArgumentError(
+        "use the observation-guided proposal or the survival constraint, not both"))
+    n_particles >= 2 || throw(ArgumentError("a particle filter needs n_particles >= 2"))
+    known === nothing && (known = first.(data.sampling_period))
+    last_t = min(t_star + M, data.n_timepoints)
+    last_t > t_star || return 0.0
+    constrain === nothing || (constrain = _windowed(constrain))
+    rows = (t_star + 1):last_t
+    n = data.n_individuals
+    aggs = [v for v in values(data.aggregates) if v isa AbstractArray]
+
+    # Per copy: its window rows and its aggregates. The rows up to t_star are the
+    # draw's own and shared by every copy.
+    Xw = copy(X)
+    base_agg = [copy(v) for v in aggs]
+    part_rows = [copy(view(X, rows, :)) for _ in 1:n_particles]
+    part_agg = [[copy(v) for v in aggs] for _ in 1:n_particles]
+    logw = guide ? zeros(Float64, size(X)) : nothing
+    survw = constrain === nothing ? nothing : zeros(Float64, size(X))
+    buf = _step_buffers(data, guide)
+    lW = fill(-log(n_particles), n_particles)   # log normalised weights
+    inc = zeros(n_particles)
+    logZ = 0.0
+
+    load!(k) = (Xw[rows, :] .= part_rows[k];
+                for (v, s) in zip(aggs, part_agg[k]); copyto!(v, s); end)
+    save!(k) = (part_rows[k] .= view(Xw, rows, :);
+                for (v, s) in zip(aggs, part_agg[k]); copyto!(s, v); end)
+
+    for t in rows
+        for k in 1:n_particles
+            load!(k)
+            _forward_step!(rng, model, data, Xw, t, t_star, last_t, known, entrants,
+                           constrain, guide, logw, survw, buf)
+            lp = 0.0
+            for i in 1:n
+                f_i, l_i = data.sampling_period[i]
+                (known[i] <= t_star && f_i <= t <= min(l_i, data.n_timepoints)) || continue
+                lp += cell_logdensity(model, data, Xw, i, t)
+                logw === nothing || (lp += logw[t, i])
+                if survw !== nothing
+                    lp += survw[t, i]
+                    survw[t, i] = 0.0
+                end
+            end
+            inc[k] = lp
+            save!(k)
+        end
+        # log of the weighted mean increment, then the new normalised weights
+        a = lW .+ inc
+        m = maximum(a)
+        isfinite(m) || return -Inf
+        s = sum(exp.(a .- m))
+        logZ += m + log(s)
+        lW .= a .- (m + log(s))
+        ess = 1 / sum(exp.(2 .* lW))
+        if t < last_t && ess < ess_threshold * n_particles
+            idx = _systematic_resample(rng, exp.(lW))
+            part_rows = [copy(part_rows[j]) for j in idx]
+            part_agg = [[copy(v) for v in part_agg[j]] for j in idx]
+            fill!(lW, -log(n_particles))
         end
     end
-    Xf
+    for (v, b) in zip(aggs, base_agg); copyto!(v, b); end
+    logZ
+end
+
+function _systematic_resample(rng, w)
+    n = length(w)
+    c = cumsum(w ./ sum(w))
+    u = (rand(rng) + (0:(n - 1))) ./ n
+    idx = Vector{Int}(undef, n)
+    j = 1
+    for k in 1:n
+        while j < n && c[j] < u[k]; j += 1; end
+        idx[k] = j
+    end
+    idx
 end
 
 # Backward message over hi, hi-1, ..., t for individual i: beta[s] is
@@ -253,6 +384,10 @@ cell's weight alone does not correct its density -- another individual's
 guided moves change its dynamics -- so for a coupled model only the `Joint()`
 cell is a valid estimate; [`lfo_cv`](@ref) refuses the rest.
 
+`resample = true` treats the `n_sim` trajectories as particles and resamples
+them between the window's timepoints (see [`score_window_resampled`](@ref)).
+`Joint()` only.
+
 `-Inf` is charged to the offending individual's own cell and the loop continues.
 Returning early on the first inadmissible individual would silently re-impose
 joint scoring no matter which granularity was asked for: the single easiest way
@@ -268,7 +403,8 @@ function score_window(model, data::EpidemicData, X, t_star::Int, M::Int,
                       survival_weight = nothing,
                       known = nothing,
                       entrants::Bool = true,
-                      guide::Bool = false)
+                      guide::Bool = false,
+                      resample::Bool = false)
     known === nothing && (known = first.(data.sampling_period))
     last_t = min(t_star + M, data.n_timepoints)
     reps = [Dict{Any,Float64}() for _ in 1:n_sim]
@@ -280,6 +416,25 @@ function score_window(model, data::EpidemicData, X, t_star::Int, M::Int,
     reset_aggregates!(data)
     apply_derived_summaries!(model, data, X)
     _drop_unknown!(model, data, X, t_star, known; entrants)
+
+    if resample
+        g isa Joint || throw(ArgumentError(
+            "a resampled window estimates only the Joint() density"))
+        (constrain === nothing) == (survival_weight === nothing) || throw(ArgumentError(
+            "pass `constrain` and `survival_weight` together or not at all"))
+        lp = score_window_resampled(model, data, X, t_star, M; cell_logdensity,
+                                    n_particles = n_sim, rng, constrain, known,
+                                    entrants, guide)
+        if is_informative !== nothing
+            for t in (t_star + 1):last_t, i in 1:data.n_individuals
+                f_i, l_i = data.sampling_period[i]
+                (known[i] <= t_star && f_i <= t <= min(l_i, data.n_timepoints)) || continue
+                is_informative(data, i, t) && (n_inf += 1)
+            end
+        end
+        return (Dict{Any,Float64}(cell_of(g, 1, 1) => lp), n_inf)
+    end
+
     aggregate_base = [copy(v) for v in values(data.aggregates)]
 
     for r in 1:n_sim

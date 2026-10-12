@@ -172,3 +172,80 @@ end
     @test_throws ArgumentError lfo_cv(spec, d; L = t_star, M, cutoffs = [t_star],
                                       granularity = Pointwise(), verbose = false)
 end
+
+@testset "window estimators after conditioning at the cutoff: exact reference" begin
+    # Five individuals in one group, so the window density is a product over
+    # coupled individuals. Draws are conditioned on presence at the cutoff, then
+    # the window is estimated four ways: independent trajectories, a particle
+    # filter over the window, the observation-guided proposal, and both. Each must
+    # hit the exact density; resampling must not widen the spread of the
+    # per-draw terms.
+    th = (; _TC..., b = 0.6)
+    y = [1  2  1  1  1;
+         1  0  2  1  0;
+         1  0  0  2  1;
+         2  0  0  0  2;
+         0  2  2  2  0;
+         2  0  2  0  2;
+         0  2  0  2  2]
+    d = _coupled(y; group = ones(Int, 5))
+    t_star, M = 4, 3
+    ref = joint_reference(th, d, t_star, M; alive = [1, 2, 3, 4, 5])
+    plan = truncation(keep = (:y,))
+    train = truncate_data(d, plan, t_star)
+    kp = (i, t, last_t) -> any(>(0), @view d.y[t:last_t, i])
+    con, sw = survival_constrained(kp)
+    logobs = (m, data, X, i, t) -> log(data.observation_weight(m, data, X, i, t, X[t, i]))
+    present = [i for i in 1:5 if kp(i, t_star + 1, t_star + M)]
+
+    n = 4000
+    rng = StableRNG(5)
+    Xs = joint_sample(rng, th, d, t_star, n)
+    lc = zeros(n)
+    Xc = Vector{Matrix{Int}}(undef, n)
+    for s in 1:n
+        Xc[s] = copy(Xs[s])
+        lc[s] = condition_present!(rng, th, train, Xc[s], present)
+    end
+    function terms(; guide, resample, n_sim)
+        out = zeros(n)
+        for s in 1:n
+            c, _ = score_window(th, d, Xc[s], t_star, M, Joint(); cell_logdensity = logobs,
+                                rng = StableRNG(1000 + s), n_sim,
+                                constrain = guide ? nothing : con,
+                                survival_weight = guide ? nothing : sw,
+                                guide, resample)
+            out[s] = lc[s] + c[1]
+        end
+        out
+    end
+    lme(x) = (m = maximum(x); m + log(mean(exp.(x .- m))))
+    se(x) = (w = exp.(x .- maximum(x)); std(w) / mean(w) / sqrt(length(x)))
+    arms = Dict(:plain        => terms(guide = false, resample = false, n_sim = 16),
+                :resampled    => terms(guide = false, resample = true,  n_sim = 16),
+                :guided       => terms(guide = true,  resample = false, n_sim = 16),
+                :guided_resampled => terms(guide = true, resample = true, n_sim = 16))
+    for (name, x) in arms
+        @test all(isfinite, x)
+        @test abs(lme(x) - ref.logp) < 4.5 * se(x) + 1e-3
+    end
+    @test std(arms[:resampled]) <= std(arms[:plain])
+
+    # through the driver, with the guided proposal standing in for the constraint
+    fit = (tr, cutoff) -> ([th for _ in 1:n], Xs)
+    res = lfo_cv(LFOSpec(; fit, cell_logdensity = logobs, plan, constrain = con,
+                         survival_weight = sw, condition_cutoff = true, guide = true,
+                         resample = true, n_sim = 16),
+                 d; L = t_star, M, cutoffs = [t_star], granularity = Joint(), verbose = false)
+    @test res.windows[1].n_finite[:joint] == n
+    @test abs(elpd(res, :joint) - ref.logp) < 0.1
+    @test 1 <= res.meta[:draw_ess][t_star] <= n
+
+    # refusals: resampling is joint only and needs particles
+    @test_throws ArgumentError lfo_cv(
+        LFOSpec(; fit, cell_logdensity = logobs, plan, resample = true, n_sim = 16),
+        d; L = t_star, M, cutoffs = [t_star], granularity = Pointwise(), verbose = false)
+    @test_throws ArgumentError lfo_cv(
+        LFOSpec(; fit, cell_logdensity = logobs, plan, resample = true),
+        d; L = t_star, M, cutoffs = [t_star], granularity = Joint(), verbose = false)
+end

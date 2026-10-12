@@ -143,7 +143,7 @@ export LFOResult, WindowResult, elpd, compare, cutoffs, n_informative
 export cell_scores, cell_elpd
 export model_weights
 export forward_simulate, score_window, survival_constrained
-export iffbs_present!, condition_present!
+export iffbs_present!, condition_present!, score_window_resampled
 export LFOSpec, lfo_cv, LFOScorer, ForwardSimulation, ExactHMM
 export psis_smooth, psis_ess
 export LocalBackend, SlurmArray, SweepHandle, sweep_status, work_item, write_sbatch

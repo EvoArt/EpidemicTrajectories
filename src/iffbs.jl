@@ -199,8 +199,10 @@ function forward_filter!(probs, trans_cache, scratch, xᵢ, start_sampling, end_
         cur[s] = base[s] * obs[s] * rest[s]
         z0 += cur[s]
     end
+    # the same degenerate fallback as every later step: 0/0 here would carry
+    # NaN through the whole pass, and through the MH scorer's log-density
     @inbounds for s in 1:N
-        probs[1, s] = cur[s] / z0
+        probs[1, s] = z0 > 0 ? cur[s] / z0 : one(z0) / N
     end
     # trans_cache[:, :, 1] is never read (backward_sample! walks from n_t down to
     # 2, reading trans_cache[j] for j >= 2 only), so it is left untouched, the

@@ -147,10 +147,16 @@ function _source_states(from::Expr)
     return Tuple(from.args)
 end
 
+# An explicit `(model, data, i, t) -> ...` function, called with the rate
+# arguments, so that `@survival` can multiply it like any other rate expression.
+# Anything else is returned unchanged.
+_called_rate(rate, args) = (rate isa Expr && rate.head == :->) ? Expr(:call, rate, args...) : rate
+
 # Parse the body of `@transitions`. Each line is `A -> B = rate`, which Julia
 # reads as `A -> (B = rate)`: an arrow whose body block holds the assignment. An
 # `@survival` line is pulled out and applied to every transition (see below).
-function _parse_transition_block(block)
+# `args` is the rate signature, needed to call explicit functions under `@survival`.
+function _parse_transition_block(block, args = _RATE_ARGS)
     lines = [x for x in block.args if !(x isa LineNumberNode)]
     transitions = Tuple{Symbol,Symbol,Any}[]
     survival_expr = nothing
@@ -197,8 +203,10 @@ function _parse_transition_block(block)
     # surviving the step (its rate is scaled by `p`), and every live state gains a
     # transition to the death state with the leftover probability `1 - p`.
     if survival_expr !== nothing
+        surv = _called_rate(survival_expr, args)
         transitions = map(transitions) do (from, to, rate)
-            to == death_state ? (from, to, rate) : (from, to, :(($survival_expr) * ($rate)))
+            to == death_state ? (from, to, rate) :
+                (from, to, :(($surv) * ($(_called_rate(rate, args)))))
         end
         # Every live state can die, not just the ones that happen to appear as a
         # source above, an absorbing state like `I` (which only ever appears as a
@@ -213,7 +221,7 @@ function _parse_transition_block(block)
         end
         for s in live_states
             if !any(t -> t[1] == s && t[2] == death_state, transitions)
-                push!(transitions, (s, death_state, :(1 - ($survival_expr))))
+                push!(transitions, (s, death_state, :(1 - ($surv))))
             end
         end
     end
@@ -324,7 +332,7 @@ macro transitions(args...)
     rate_args = shared_expr === nothing ? _RATE_ARGS : _SHARED_RATE_ARGS
     shared_val = shared_expr === nothing ? :nothing : esc(shared_expr)
 
-    trs, bare = _parse_transition_block(block)
+    trs, bare = _parse_transition_block(block, rate_args)
     seen_states = unique(vcat(Symbol[t[1] for t in trs], Symbol[t[2] for t in trs]))
     trans_pairs = [:(($(QuoteNode(t[1])), $(QuoteNode(t[2])))) for t in trs]
     rates = [_wrap_rate_expr(t[3], rate_args) for t in trs]

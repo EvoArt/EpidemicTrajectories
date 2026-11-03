@@ -136,6 +136,67 @@ _spec_surv(model, data, i, t, shared) = shared.live
     end
 end
 
+@testset "@survival: rates written as explicit functions" begin
+    # `@survival` multiplies the survival probability into each rate before the
+    # rates become functions, so an explicit function has to be called there, not
+    # multiplied as a function object.
+    by_name = @transitions [:S, :E, :I, :D] begin
+        @survival surv death=:D
+        S -> E = foi
+        E -> I = 0.2
+    end
+    by_function = @transitions [:S, :E, :I, :D] begin
+        @survival (model, data, i, t) -> 0.9 death=:D
+        S -> E = (model, data, i, t) -> 0.1
+        E -> I = (model, data, i, t) -> 0.2
+    end
+    model = (; m=5.0)
+    @test by_function.transitions == by_name.transitions
+    for k in eachindex(by_name.rate_fns)
+        @test by_function.rate_fns[k](model, nothing, 1, 1) ≈ by_name.rate_fns[k](model, nothing, 1, 1)
+    end
+    # the survival-free coupling view keeps the explicit functions as written
+    @test by_function.coupling.rate_fns[1](model, nothing, 1, 1) ≈ 0.1
+
+    # with `@shared`, explicit functions are called with the fifth argument too
+    shared_fn = @transitions [:S, :E, :I, :D] begin
+        @shared _spec_step
+        @survival (model, data, i, t, shared) -> shared.live death=:D
+        S -> E = (model, data, i, t, shared) -> shared.inf
+        E -> I = 0.2
+    end
+    model = (; mu = 0.1, beta = 0.3)
+    sh = _spec_step(model, nothing, 1, 1)
+    rate_of(from, to) =
+        shared_fn.rate_fns[findfirst(==((from, to)), shared_fn.transitions)](model, nothing, 1, 1, sh)
+    @test rate_of(:S, :E) ≈ 0.9 * 0.3
+    @test rate_of(:E, :I) ≈ 0.9 * 0.2
+    @test rate_of(:I, :D) ≈ 0.1
+end
+
+@testset "@survival: the death state is absorbing" begin
+    # Rates are clamped away from 0 and 1, but only declared ones. The death state
+    # has none, so its row is exactly (0, ..., 0, 1).
+    states = [:S, :I, :D]
+    aggs = @aggregate states begin
+        @array n Int (1, 2)
+        n[1, t] += (state == :I)
+    end
+    spec = @transitions states begin
+        @survival (model, data, i, t) -> 0.9 death=:D
+        S -> I = (model, data, i, t) -> 0.1
+        I -> S = 0.2
+    end
+    data = epidemic_data(; n_individuals=1, n_timepoints=2, trans_mat=spec,
+                           starting_state=(m, d, X, i, t) -> [1.0, 0.0, 0.0],
+                           aggregates=aggs)
+    X = fill(3, 2, 1)
+    model = (; m=5.0)
+    P = transition_matrix_at(spec, model, data, X, 1, 1)
+    @test P[3, :] == [0.0, 0.0, 1.0]
+    @test transition_prob(spec, model, data, X, 1, 1, 3, 3) == 1.0
+end
+
 @testset "@survival: needs a death state" begin
     @test_throws Exception @eval @transitions [:S, :D] begin
         @survival $surv

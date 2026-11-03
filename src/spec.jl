@@ -6,16 +6,13 @@
 # a rate may depend on.
 
 """
-    TransitionSpec(states, transitions, rate_fns, auto_self)
+    TransitionSpec(states, transitions, rate_fns[, coupling[, shared]])
 
 The allowed state transitions of a model and their rates. `states` lists the state
 names in the order that fixes their integer encoding (state `k` in a trajectory
 `X` means `states[k]`). `transitions[k]` is the `(from, to)` pair for
-`rate_fns[k]`, each rate a function `(model, data, i, t) -> probability`.
-
-`auto_self`: whether each state's self-transition is filled in automatically with
-the leftover probability mass, so the user only declares the transitions that
-actually move an individual.
+`rate_fns[k]`, each rate a function `(model, data, i, t) -> probability`. Each
+state's self-transition is the probability its declared transitions leave.
 
 `rate_fns` is a `Tuple`, and the type is parameterised on it, so each rate's own
 concrete function type is known. That is a performance decision, not a style one:
@@ -62,17 +59,16 @@ struct TransitionSpec{RF<:Tuple,C,S}
     states::Vector{Symbol}
     transitions::Vector{Tuple{Symbol,Symbol}}
     rate_fns::RF
-    auto_self::Bool
     coupling::C            # a survival-free TransitionSpec, or `nothing`
     shared::S              # `(model, data, i, t) -> values` for every rate, or `nothing`
 end
-# Backward-compatible constructors: no separate coupling view (coupling === nothing
-# means "use the full spec", which is correct whenever there is no survival
-# factor), and no shared step values.
-TransitionSpec(states, transitions, rate_fns, auto_self) =
-    TransitionSpec(states, transitions, rate_fns, auto_self, nothing, nothing)
-TransitionSpec(states, transitions, rate_fns, auto_self, coupling) =
-    TransitionSpec(states, transitions, rate_fns, auto_self, coupling, nothing)
+# Shorter constructors: no separate coupling view (coupling === nothing means "use
+# the full spec", which is correct whenever there is no survival factor), and no
+# shared step values.
+TransitionSpec(states, transitions, rate_fns) =
+    TransitionSpec(states, transitions, rate_fns, nothing, nothing)
+TransitionSpec(states, transitions, rate_fns, coupling) =
+    TransitionSpec(states, transitions, rate_fns, coupling, nothing)
 
 # Rates may be written at three levels of sugar, in decreasing order of brevity:
 #
@@ -259,7 +255,7 @@ macro survival(args...)
 end
 
 """
-    @transitions :individual [:auto_self] begin
+    @transitions [state_space] begin
         A -> B = rate
         ...
     end
@@ -269,14 +265,14 @@ Declare a model's states, transitions and rates, returning a
 a bare expression referring to `model`, `data`, `i`, `t` by name, or an explicit
 `(model, data, i, t) -> ...` lambda.
 
-`:auto_self` fills each state's self-transition with the leftover probability
-mass, so only the transitions that move an individual need declaring. The state
+Each state's self-transition is the probability its declared transitions leave,
+so only the transitions that move an individual need declaring. The state
 encoding is the order the state names first appear (state `k` in `X` means
 `spec.states[k]`).
 
 # Example
 ```julia
-spec = @transitions :individual :auto_self begin
+spec = @transitions begin
     S -> I = infection_func(model, data, i, t)
     I -> S = recovery_func(model, data, i, t)
 end
@@ -300,18 +296,16 @@ A bare rate name `r` is then called as `r(model, data, i, t, shared)`.
 """
 macro transitions(args...)
     rest = collect(args)
-    auto_self = true          # the common case; opt out with :no_auto_self
 
     while !isempty(rest) && rest[1] isa QuoteNode
         tag = rest[1].value
         if tag == :individual
             # The only supported style; accepted for explicitness.
-        elseif tag == :auto_self
-            auto_self = true
-        elseif tag == :no_auto_self
-            auto_self = false
+        elseif tag in (:auto_self, :no_auto_self)
+            error("@transitions takes no :$tag tag: a state's self-transition is " *
+                  "always the probability its declared transitions leave")
         else
-            error("Unsupported @transitions tag: $tag (expected :individual, :auto_self or :no_auto_self)")
+            error("Unsupported @transitions tag: $tag (expected :individual)")
         end
         rest = rest[2:end]
     end
@@ -343,10 +337,10 @@ macro transitions(args...)
                                 Symbol[$(map(QuoteNode, seen_states)...)]))
 
     # The survival-free coupling view, built over the same state encoding so its
-    # indices line up. Only the bare infection/progression moves; `auto_self` gives
-    # the leftover mass as the "stay" probability (e.g. S->S = 1 - foi), which is
-    # exactly what the coupling scores a non-moving neighbour against. `nothing`
-    # when there was no `@survival`.
+    # indices line up. Only the bare infection/progression moves; the leftover mass
+    # is the "stay" probability (e.g. S->S = 1 - foi), which is exactly what the
+    # coupling scores a non-moving neighbour against. `nothing` when there was no
+    # `@survival`.
     coupling_expr = if bare === nothing
         :nothing
     else
@@ -355,7 +349,7 @@ macro transitions(args...)
         :(TransitionSpec($states_expr,
                          Tuple{Symbol,Symbol}[$(bare_pairs...)],
                          ($(map(esc, bare_rates)...),),
-                         true, nothing, $shared_val))
+                         nothing, $shared_val))
     end
 
     quote
@@ -363,7 +357,6 @@ macro transitions(args...)
             $states_expr,
             Tuple{Symbol,Symbol}[$(trans_pairs...)],
             ($(map(esc, rates)...),),
-            $(auto_self),
             $coupling_expr,
             $shared_val,
         )

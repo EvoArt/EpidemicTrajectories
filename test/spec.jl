@@ -13,7 +13,6 @@ surv(model, data, i, t) = 0.9
     @test spec isa TransitionSpec
     @test spec.states == [:S, :I]                      # order of first appearance
     @test spec.transitions == [(:S, :I), (:I, :S)]
-    @test spec.auto_self == true                       # the default
 end
 
 @testset "@transitions: explicit state_space fixes the numbering" begin
@@ -75,11 +74,14 @@ end
     @test length(spec.transitions) == 3
 end
 
-@testset "@transitions: auto_self opt-out" begin
-    spec = @transitions :no_auto_self begin
-        S -> I = foi
+@testset "@transitions: self-transition tags are refused" begin
+    # A self-transition always takes the leftover probability, so there is
+    # nothing for these tags to switch.
+    for tag in (:auto_self, :no_auto_self)
+        @test_throws Exception @eval @transitions $(QuoteNode(tag)) begin
+            S -> I = $foi
+        end
     end
-    @test spec.auto_self == false
 end
 
 @testset "@survival: scales the live transitions and adds the deaths" begin
@@ -213,7 +215,7 @@ end
 # ---------------------------------------------------------------------------
 # Row closure when the declared transitions overflow.
 #
-# `auto_self` derives `P[a,a] = 1 - rowsum[a]`. The per-rate clamp bounds each
+# The self-transition is `P[a,a] = 1 - rowsum[a]`. The per-rate clamp bounds each
 # declared rate but never their SUM, so a state with several declared moves out
 # of it can produce a NEGATIVE self-transition. That crashed `epidemic_loglik`
 # with a DomainError from `log(negative)` and silently corrupted the iFFBS

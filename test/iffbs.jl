@@ -276,7 +276,7 @@ end
 @testset "transition_prob equals the full matrix, entry for entry" begin
     # The likelihood reads one entry per (i,t); transition_prob computes just that
     # rather than building the matrix. It must agree exactly, including the
-    # auto_self leftover, or the likelihood is silently wrong.
+    # self-transition leftover, or the likelihood is silently wrong.
     s = _si_setup()
     pars = (; α=0.05, β=0.3, m=4.0, ν=0.2, θʳ=0.9, θᶠ=0.9)
     X = epidemic_simulator(s.data)(StableRNG(31), pars)

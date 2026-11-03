@@ -43,7 +43,7 @@ but shares one `rowsum` across all of them, see `forward_filter`).
 """
 # --- Closing a row -----------------------------------------------------------
 #
-# `auto_self` gives a state's self-transition whatever mass the declared
+# A state's self-transition takes whatever mass the declared
 # transitions out of it leave behind: `P[a, a] = 1 - rowsum[a]`. That is only a
 # probability if `rowsum[a] <= 1`, and NOTHING guarantees it.
 #
@@ -142,8 +142,8 @@ every timepoint: on the badger model that is ~380k matrix allocations per
 likelihood call, each of Dual numbers under AD. The sampler still uses the full
 matrix, because it genuinely needs every entry.
 
-Respects `auto_self`: a self-transition takes whatever probability mass the
-declared transitions out of that state leave behind.
+A self-transition takes whatever probability mass the declared transitions out of
+that state leave behind.
 """
 function transition_prob(trans_mat::TransitionSpec, model, data::EpidemicData, X, i, t, from::Int, to::Int)
     T = _param_eltype(model)

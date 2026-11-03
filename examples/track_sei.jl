@@ -35,11 +35,11 @@ function sei_counts(X)
 end
 
 # Wrap the real iFFBS kernel: after it produces the new X, record the counts.
-struct TrackingIFFBS{K} <: PracticalBayes.AbstractLatentKernel
+struct TrackingIFFBS{K} <: PracticalBayes.AbstractGibbsKernel
     inner::K
 end
-function PracticalBayes.latent_step(rng, k::TrackingIFFBS, block_names, c::PracticalBayes.ModelConditional)
-    out = PracticalBayes.latent_step(rng, k.inner, block_names, c)
+function PracticalBayes.gibbs_step(rng, k::TrackingIFFBS, block_names, c::PracticalBayes.ModelConditional)
+    out = PracticalBayes.gibbs_step(rng, k.inner, block_names, c)
     push!(SEI_LOG, sei_counts(out.X))
     out
 end

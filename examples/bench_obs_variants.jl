@@ -60,13 +60,13 @@ obs_tests = USE_VECTOR_OBS ?
                               observation_weight=badger_obs_tests_weight)
 
 # --- Timing shims -----------------------------------------------------------
-struct TimedLatent{K} <: PracticalBayes.AbstractLatentKernel
+struct TimedLatent{K} <: PracticalBayes.AbstractGibbsKernel
     inner::K
     acc::Base.RefValue{Float64}
 end
-function PracticalBayes.latent_step(rng, k::TimedLatent, block_names, c::PracticalBayes.ModelConditional)
+function PracticalBayes.gibbs_step(rng, k::TimedLatent, block_names, c::PracticalBayes.ModelConditional)
     t0 = time_ns()
-    out = PracticalBayes.latent_step(rng, k.inner, block_names, c)
+    out = PracticalBayes.gibbs_step(rng, k.inner, block_names, c)
     k.acc[] += (time_ns() - t0) / 1e9
     out
 end

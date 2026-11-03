@@ -403,7 +403,7 @@ println("  delta-consistency error: ",
         abs((cond1 - cond0) - (joint1 - joint0)))
 
 # ---------------------------------------------------------------------------
-# 4. As a PracticalBayes latent kernel.
+# 4. As a PracticalBayes Gibbs kernel.
 #
 # `epidemic_latent_sampler(; mh=true)` returns something callable as
 # `(rng, model, X) -> X`, exactly like the plain sampler, but carrying `.stats`.

@@ -66,10 +66,10 @@ _pars(c) = (; tau=c.values.tau, alpha=c.values.alpha, lambda=c.values.lambda,
             thetas=c.values.thetas, rhos=c.values.rhos, phis=c.values.phis,
             etas=c.values.etas, nu=c.values.nu)
 
-struct iFFBSKernel <: PracticalBayes.AbstractLatentKernel
+struct iFFBSKernel <: PracticalBayes.AbstractGibbsKernel
     latent!::Function
 end
-PracticalBayes.latent_step(rng, k::iFFBSKernel, block_names, c::PracticalBayes.ModelConditional) = begin
+PracticalBayes.gibbs_step(rng, k::iFFBSKernel, block_names, c::PracticalBayes.ModelConditional) = begin
     X = copy(c.values.X)
     k.latent!(rng, _pars(c), X)
     (; X=X)
@@ -81,11 +81,11 @@ end
 
 # Capture probability per season: Beta, from how often a badger that was alive AND
 # in a trapped group was actually caught.
-struct EtaKernel <: PracticalBayes.AbstractLatentKernel
+struct EtaKernel <: PracticalBayes.AbstractGibbsKernel
     a::Float64
     b::Float64
 end
-function PracticalBayes.latent_step(rng, k::EtaKernel, block_names, c::PracticalBayes.ModelConditional)
+function PracticalBayes.gibbs_step(rng, k::EtaKernel, block_names, c::PracticalBayes.ModelConditional)
     X = c.values.X
     etas = zeros(Float64, NS)
     for s in 1:NS
@@ -114,10 +114,10 @@ end
 # independent Betas would let the susceptible probability go negative, and the
 # likelihood takes its log. The reference draws a Dirichlet triple for exactly
 # this reason; so does this kernel, and `NuSimplex` below keeps the prior honest.
-struct NuKernel <: PracticalBayes.AbstractLatentKernel
+struct NuKernel <: PracticalBayes.AbstractGibbsKernel
     hp::Vector{Float64}
 end
-function PracticalBayes.latent_step(rng, k::NuKernel, block_names, c::PracticalBayes.ModelConditional)
+function PracticalBayes.gibbs_step(rng, k::NuKernel, block_names, c::PracticalBayes.ModelConditional)
     X = c.values.X
     nu = Matrix{Float64}(undef, NNU, 2)     # columns: nuE, nuI
     for (idx, nt) in enumerate(data.nu_times)
@@ -141,7 +141,7 @@ end
 #
 # Declared as a *Discrete* matrix distribution even though its values are
 # continuous. That is not a mistake: in PracticalBayes, discrete-valued sites are
-# what get routed to the value store, where a latent kernel owns them and NUTS
+# what get routed to the value store, where a Gibbs kernel owns them and NUTS
 # never touches them. A continuous declaration would send `nu` to NUTS instead —
 # which cannot work, since its conjugate update is the whole point, and NUTS would
 # also need an unconstrained transform for a simplex it doesn't know about. The

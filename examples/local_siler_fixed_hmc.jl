@@ -157,10 +157,10 @@ _pars(c) = (; tau=c.values.tau, alpha=c.values.alpha, lambda=c.values.lambda,
 # parameterising it keeps the call concrete. (The call happens once per sweep, so
 # unlike the EtaKernel fix this is not a hot-loop win — but it costs nothing and
 # removes an inference barrier at the entry to the 26%-of-sweep iFFBS block.)
-struct iFFBSKernel{F} <: PracticalBayes.AbstractLatentKernel
+struct iFFBSKernel{F} <: PracticalBayes.AbstractGibbsKernel
     latent!::F
 end
-PracticalBayes.latent_step(rng, k::iFFBSKernel, block_names, c::PracticalBayes.ModelConditional) = begin
+PracticalBayes.gibbs_step(rng, k::iFFBSKernel, block_names, c::PracticalBayes.ModelConditional) = begin
     X = copy(c.values.X)
     k.latent!(rng, _pars(c), X)
     (; X=X)
@@ -190,14 +190,14 @@ end
 # `season[t] == s || continue`. Verified bit-identical counts
 # (caught=[1579,3466,4463,2599], available=[7856,8802,8667,8156]) — see
 # examples/bench_eta.jl.
-struct EtaKernel{D} <: PracticalBayes.AbstractLatentKernel
+struct EtaKernel{D} <: PracticalBayes.AbstractGibbsKernel
     a::Float64
     b::Float64
     data::D
 end
 EtaKernel(a, b) = EtaKernel(a, b, data)   # convenience: capture the current `data`
 
-function PracticalBayes.latent_step(rng, k::EtaKernel, block_names, c::PracticalBayes.ModelConditional)
+function PracticalBayes.gibbs_step(rng, k::EtaKernel, block_names, c::PracticalBayes.ModelConditional)
     X = c.values.X
     d = k.data                      # typed field, not the untyped global
     caught = zeros(Int, NS)
@@ -222,13 +222,13 @@ end
 # Carries `data` in a typed field for the same reason as EtaKernel above — this
 # loop is far smaller (nu_times x n_individuals, not NS x T x N), so it measured
 # only 0.022 s/sweep, but the untyped-global defect is identical and the fix free.
-struct NuKernel{D} <: PracticalBayes.AbstractLatentKernel
+struct NuKernel{D} <: PracticalBayes.AbstractGibbsKernel
     hp::Vector{Float64}
     data::D
 end
 NuKernel(hp) = NuKernel(hp, data)
 
-function PracticalBayes.latent_step(rng, k::NuKernel, block_names, c::PracticalBayes.ModelConditional)
+function PracticalBayes.gibbs_step(rng, k::NuKernel, block_names, c::PracticalBayes.ModelConditional)
     X = c.values.X
     d = k.data
     nu = Matrix{Float64}(undef, NNU, 2)     # columns: nuE, nuI

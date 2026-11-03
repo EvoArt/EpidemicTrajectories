@@ -5,10 +5,10 @@
 # is a 300x gap, so ~99.7% of the block is NOT the algorithm. This isolates
 # where it goes.
 #
-# Prime suspect: the kernel's own body does `X = c.values.X`, and `latent_step`
+# Prime suspect: the kernel's own body does `X = c.values.X`, and `gibbs_step`
 # is called from gibbs.jl:243-248 as
 #     c = ModelConditional(model, values)
-#     newvals = latent_step(...)
+#     newvals = gibbs_step(...)
 #     values = merge(values, newvals)
 # `values` is a NamedTuple containing X — a 161x2384 Int matrix, ~3 MB. If any
 # of that path copies X (or if `data` / globals are accessed untyped inside the

@@ -135,11 +135,11 @@ Base.size(d::TrajectoryLatent) = (d.n_time, d.n_ind)
 Distributions.logpdf(::TrajectoryLatent, X::AbstractMatrix) = 0.0
 Distributions.rand(rng::AbstractRNG, d::TrajectoryLatent) = fill(1, d.n_time, d.n_ind)
 
-struct iFFBSKernel <: PracticalBayes.AbstractLatentKernel
+struct iFFBSKernel <: PracticalBayes.AbstractGibbsKernel
     latent!::Function
 end
 
-PracticalBayes.latent_step(rng, k::iFFBSKernel, block_names, c::PracticalBayes.ModelConditional) = begin
+PracticalBayes.gibbs_step(rng, k::iFFBSKernel, block_names, c::PracticalBayes.ModelConditional) = begin
     block_names == (:X,) || error("iFFBS kernel only handles :X")
     pars = (; α=c.values.α, β=c.values.β, m=c.values.m̃ + 1.0, ν=c.values.ν, θʳ=c.values.θʳ, θᶠ=c.values.θᶠ)
     X = copy(c.values.X)
@@ -149,25 +149,25 @@ end
 
 # The initial infection frequency and the two test sensitivities have closed-form
 # conditional posteriors, so they get conjugate kernels rather than NUTS.
-struct NuKernel <: PracticalBayes.AbstractLatentKernel
+struct NuKernel <: PracticalBayes.AbstractGibbsKernel
     a::Float64
     b::Float64
 end
 
-PracticalBayes.latent_step(rng, k::NuKernel, block_names, c::PracticalBayes.ModelConditional) = begin
+PracticalBayes.gibbs_step(rng, k::NuKernel, block_names, c::PracticalBayes.ModelConditional) = begin
     X = c.values.X
     n_inf = count(==(2), @view X[1, :])
     (; ν=rand(rng, Beta(k.a + n_inf, k.b + size(X, 2) - n_inf)))
 end
 
-struct TestSensKernel <: PracticalBayes.AbstractLatentKernel
+struct TestSensKernel <: PracticalBayes.AbstractGibbsKernel
     a::Float64
     b::Float64
     Y::Matrix{Int}
     name::Symbol
 end
 
-PracticalBayes.latent_step(rng, k::TestSensKernel, block_names, c::PracticalBayes.ModelConditional) = begin
+PracticalBayes.gibbs_step(rng, k::TestSensKernel, block_names, c::PracticalBayes.ModelConditional) = begin
     X = c.values.X
     n_pos = 0
     n_tested_inf = 0

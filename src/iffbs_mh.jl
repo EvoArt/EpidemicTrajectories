@@ -408,7 +408,7 @@ end
     IFFBSMHSampler
 
 What [`epidemic_latent_sampler`](@ref) returns for `mh=true`. Callable as
-`(rng, model, X) -> X`, so it drops into a PracticalBayes latent kernel exactly
+`(rng, model, X) -> X`, so it drops into a PracticalBayes Gibbs kernel exactly
 like the plain sampler does, while still exposing `.stats` for the acceptance
 diagnostics:
 

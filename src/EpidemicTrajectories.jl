@@ -9,7 +9,7 @@ module EpidemicTrajectories
 #
 # All three are ordinary Julia functions with no dependency on any probabilistic
 # programming framework. The likelihood drops into a PracticalBayes (or Turing)
-# `@addlogprob!`; the latent sampler is what a PracticalBayes latent kernel calls
+# `@addlogprob!`; the latent sampler is what a PracticalBayes Gibbs kernel calls
 # once per Gibbs sweep — outside every gradient call, which is the whole reason
 # this package exists.
 #

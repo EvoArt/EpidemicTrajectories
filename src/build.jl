@@ -425,7 +425,7 @@ Build the full conditional of one individual's trajectory:
 up to an additive constant that does not depend on `x_i`.
 
 This is the target of [`iffbs_mh!`](@ref)'s accept/reject step. It is also the
-generic piece any OTHER per-individual latent kernel needs (particle Gibbs,
+generic piece any OTHER per-individual Gibbs kernel needs (particle Gibbs,
 blocked Gibbs, MH move-events), which is why it lives here rather than in
 `iffbs_mh.jl`.
 
@@ -611,7 +611,7 @@ end
 Build the latent-state sampler: `latent!(rng, model, X) -> X`, one sweep
 resampling the whole trajectory in place given the parameters.
 
-This is what a PracticalBayes `AbstractLatentKernel`'s `latent_step` calls once per
+This is what a PracticalBayes `AbstractGibbsKernel`'s `gibbs_step` calls once per
 Gibbs sweep: outside every gradient call, which is the point of the package.
 
 iFFBS is one choice of latent sampler; the role is deliberately just "a function

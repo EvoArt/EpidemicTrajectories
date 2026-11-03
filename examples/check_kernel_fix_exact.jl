@@ -24,11 +24,11 @@ using Printf
 using StableRNGs: StableRNG
 
 # --- Reference reimplementations of the ORIGINAL (pre-fix) kernel bodies ------
-struct EtaKernelOrig <: PracticalBayes.AbstractLatentKernel
+struct EtaKernelOrig <: PracticalBayes.AbstractGibbsKernel
     a::Float64
     b::Float64
 end
-function PracticalBayes.latent_step(rng, k::EtaKernelOrig, block_names, c::PracticalBayes.ModelConditional)
+function PracticalBayes.gibbs_step(rng, k::EtaKernelOrig, block_names, c::PracticalBayes.ModelConditional)
     X = c.values.X
     etas = zeros(Float64, NS)
     for s in 1:NS
@@ -49,10 +49,10 @@ function PracticalBayes.latent_step(rng, k::EtaKernelOrig, block_names, c::Pract
     (; etas=etas)
 end
 
-struct NuKernelOrig <: PracticalBayes.AbstractLatentKernel
+struct NuKernelOrig <: PracticalBayes.AbstractGibbsKernel
     hp::Vector{Float64}
 end
-function PracticalBayes.latent_step(rng, k::NuKernelOrig, block_names, c::PracticalBayes.ModelConditional)
+function PracticalBayes.gibbs_step(rng, k::NuKernelOrig, block_names, c::PracticalBayes.ModelConditional)
     X = c.values.X
     nu = Matrix{Float64}(undef, NNU, 2)
     for (idx, nt) in enumerate(data.nu_times)

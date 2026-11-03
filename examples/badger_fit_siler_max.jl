@@ -683,23 +683,23 @@ _pars(c) = (; tau=c.values.tau, alpha=c.values.alpha, lambda=c.values.lambda,
             thetas=c.values.thetas, rhos=c.values.rhos, phis=c.values.phis,
             etas=c.values.etas, nu=c.values.nu)
 
-struct iFFBSKernel{F} <: PracticalBayes.AbstractLatentKernel
+struct iFFBSKernel{F} <: PracticalBayes.AbstractGibbsKernel
     latent!::F
 end
-PracticalBayes.latent_step(rng, k::iFFBSKernel, block_names, c::PracticalBayes.ModelConditional) = begin
+PracticalBayes.gibbs_step(rng, k::iFFBSKernel, block_names, c::PracticalBayes.ModelConditional) = begin
     X = copy(c.values.X)
     k.latent!(rng, _pars(c), X)
     (; X=X)
 end
 
-struct EtaKernel{D} <: PracticalBayes.AbstractLatentKernel
+struct EtaKernel{D} <: PracticalBayes.AbstractGibbsKernel
     a::Float64
     b::Float64
     data::D
 end
 EtaKernel(a, b) = EtaKernel(a, b, data)
 
-function PracticalBayes.latent_step(rng, k::EtaKernel, block_names, c::PracticalBayes.ModelConditional)
+function PracticalBayes.gibbs_step(rng, k::EtaKernel, block_names, c::PracticalBayes.ModelConditional)
     X = c.values.X
     d = k.data
     caught = zeros(Int, NS)
@@ -721,13 +721,13 @@ function PracticalBayes.latent_step(rng, k::EtaKernel, block_names, c::Practical
     (; etas=etas)
 end
 
-struct NuKernel{D} <: PracticalBayes.AbstractLatentKernel
+struct NuKernel{D} <: PracticalBayes.AbstractGibbsKernel
     hp::Vector{Float64}
     data::D
 end
 NuKernel(hp) = NuKernel(hp, data)
 
-function PracticalBayes.latent_step(rng, k::NuKernel, block_names, c::PracticalBayes.ModelConditional)
+function PracticalBayes.gibbs_step(rng, k::NuKernel, block_names, c::PracticalBayes.ModelConditional)
     X = c.values.X
     d = k.data
     nu = Matrix{Float64}(undef, NNU, 2)

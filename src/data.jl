@@ -46,7 +46,7 @@ looks inside.
 abstract `Vector{Function}` field erases that at every read, forcing `for ds in
 data.derived_summaries` (the iFFBS sweep, the simulator, and the coupling term in
 `make_rest_contribution`) through runtime dispatch on every call. Confirmed via
-profiling: this alone accounted for the bulk of a ~6x gap between the badger
+profiling: this alone accounted for the bulk of a ~6x gap between a large
 model's iFFBS sweep and its reference-implementation counterpart, matching the
 same pattern found earlier for `trans_mat`: see the devlog/repro log for both.
 """
@@ -221,7 +221,7 @@ Build the [`EpidemicData`](@ref) for a model.
   `s`` — the same information as `observation_process`, one state at a time. **This
   is the recommended form for performance**: the likelihood needs only the one
   entry `w[X[t,i]]`, so the scalar avoids allocating a whole weight vector per
-  `(i, t)` under AD (on the badger model, ~187k arrays of Duals and 18 MB per
+  `(i, t)` under AD (on a large model, ~187k arrays of Duals and 18 MB per
   gradient call, see [`epidemic_obs_loglik`](@ref)). You may supply **either or
   both**:
     * only `observation_weight`, the package derives the filter's vector from it
@@ -231,7 +231,7 @@ Build the [`EpidemicData`](@ref) for a model.
     * only `observation_process`: works unchanged, but the likelihood indexes the
       vector (correct, just allocates);
     * both, used exactly as given. Needed when the likelihood's factor is not a
-      plain restriction of the filter's vector (e.g. the badger model, whose filter
+      plain restriction of the filter's vector (e.g. a model whose filter
       sees `capture × tests` but whose likelihood scores only the `tests` factor,
       capture being conjugate). When both are set they must agree entry-for-entry.
   Defaults to [`no_observations`](@ref) when neither is given.
@@ -364,7 +364,7 @@ Contract to honor, all three matter:
   window, back to back, and relies on it being side-effect-free from the outside.
 
 Sketch, for a model where the coupling is entirely through a per-`(group,time)`
-force of infection (the badger model's shape): maintain
+force of infection: maintain
 `logProbRestTotal[s, t]`, the sum, over all individuals, of "how likely was this
 individual's realised move if the group's FOI corresponded to candidate state
 `s`" — as a derived summary, patched incrementally the same way `i`'s aggregate
@@ -499,7 +499,7 @@ function epidemic_data(; n_individuals, n_timepoints, trans_mat,
     #     still reaches the likelihood via `epidemic_obs_loglik(data)`);
     #   * only the vector given  -> unchanged behaviour (scalar stays `nothing`, the
     #     likelihood falls back to indexing the vector, correct, just allocates);
-    #   * both given             -> used exactly as supplied (the badger split, where
+    #   * both given             -> used exactly as supplied (a split where
     #     the likelihood's factor is not a plain restriction of the filter's vector);
     #   * neither                -> `no_observations` (the honest default).
     n_states = length(state_space)

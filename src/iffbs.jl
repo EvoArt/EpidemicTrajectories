@@ -80,7 +80,7 @@ initialise_forward_filter(model, data::EpidemicData, X, i, t) = data.starting_st
 #
 # Before this, every individual allocated a fresh `N x N x n_t` `trans_cache`
 # (~20 KB at N=4, n_t=78) and an `n_t x N` `probs`, then zeroed both: ~48 MB of
-# pointless zeroing per badger sweep, and a fresh cold region of memory each time.
+# pointless zeroing per sweep of a large model, and a fresh cold region of memory each time.
 #
 # Held in a module-level `Ref` keyed by size rather than threaded through the call
 # signature: `iffbs!` is single-threaded by construction (individuals within a
@@ -143,8 +143,8 @@ runs, so they can't share one buffer the way a single-matrix-at-a-time loop woul
 one contiguous `N × N × (length(xᵢ)-1)` array, filled a slice at a time via
 [`transition_matrix_at!`](@ref); `rowsum` is pure scratch (nothing outside
 `transition_matrix_at!` reads it) and is genuinely reused across every timepoint.
-Before this, one badger-sized sweep (2384 individuals, ~78-timepoint average
-window) allocated close to 185,000 short-lived `N × N` matrices; profiling showed
+Before this, one sweep of a large model (thousands of individuals, ~78-timepoint
+average window) allocated close to 185,000 short-lived `N × N` matrices; profiling showed
 that allocation, not dispatch, as the dominant cost once the earlier type-stability
 fixes had already landed (see the repro log).
 """
@@ -172,7 +172,7 @@ distribution (`trans' * probs[j-1, :]`, which also materialised a transpose), th
 unnormalised product, and the normalised result — is now a write into a reused
 `N`-length buffer, and the matrix-vector product is an explicit loop (`N` is 4 in
 the reference model; BLAS is not worth its call overhead at that size). A
-badger-sized sweep visits ~187k `(i, t)` cells, so each array that was allocated
+large-model sweep visits ~187k `(i, t)` cells, so each array that was allocated
 here cost ~187k allocations per sweep.
 """
 function forward_filter!(probs, trans_cache, scratch, xᵢ, start_sampling, end_sampling,

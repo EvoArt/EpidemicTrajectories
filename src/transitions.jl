@@ -138,7 +138,7 @@ building the matrix.
 This exists because the likelihood only ever wants one entry per `(i, t)`: the
 move the individual actually made. Going through the full matrix there allocates a
 fresh `n_states × n_states` array and evaluates every rate, for every individual at
-every timepoint: on the badger model that is ~380k matrix allocations per
+every timepoint: on a large model that is ~380k matrix allocations per
 likelihood call, each of Dual numbers under AD. The sampler still uses the full
 matrix, because it genuinely needs every entry.
 
@@ -291,7 +291,7 @@ entry: the move `j` actually made, is ever read here, and this is called once
 per affected individual per candidate state inside [`make_rest_contribution`](@ref)
 (`n_states × |affected|` times per `(i, t)` in the iFFBS forward filter). Building
 the whole matrix just to read one entry was, before this, the dominant cost of a
-badger-model iFFBS sweep: confirmed by direct per-phase timing, not just
+large model's iFFBS sweep: confirmed by direct per-phase timing, not just
 profiler self-time percentages (see the repro log): the earlier fixes to
 `forward_filter`'s own matrix build (buffer reuse) and to `derived_summaries`'
 type stability were both real but left this call, one level further into the
@@ -325,7 +325,7 @@ own rate functions never look at the focal. Verified empirically: a neighbour's
 `S -> S` log-probability really does move with the focal's state, and masking it
 out changes the sampler's weights by up to 0.25.
 
-So declaring `[(:S, :E)]` in the badger model buys the skip only for neighbours
+So declaring `[(:S, :E)]` in an S -> E -> I -> D model buys the skip only for neighbours
 currently in `E`, `I` or `D`: every `S -> *` move stays in. That is still most of
 the population once mortality bites, and it is exact.
 
@@ -379,7 +379,7 @@ must be reversible.
 
 !!! warning "Unverified: possible speed regression"
     The window check below has **not** been benchmarked. It skips ~0.2% of
-    neighbour visits on the badger model (so it does slightly LESS
+    neighbour visits on a large model (so it does slightly LESS
     `neighbor_logprob` work) but adds two integer comparisons and a tuple load
     per visit, inside the package's hottest loop. A first attempt to measure it
     was abandoned because the machine was too noisy to trust: readings ranged
@@ -429,7 +429,7 @@ function make_rest_contribution(; normalize=true, min_logprob=-1e12, affected_id
                 # exactly the factors `epidemic_loglik` scores. Skipping is exact
                 # in the same sense `coupled_mask` is.
                 #
-                # It bit the badger model, silently, and had to be found with
+                # It bit a large model, silently, and had to be found with
                 # `check_iffbs_exact`: `Xinit` fills unmonitored cells with the
                 # SUSCEPTIBLE state, so an out-of-window neighbour read as a live
                 # groupmate making an `S -> S` move: a phantom susceptible whose

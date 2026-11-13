@@ -312,7 +312,7 @@ end
     # defines and iFFBS never writes.
     #
     # Before the fix this measured `max |log alpha| = 0.16` here and 0.586 on the
-    # real badger data (11 of 1974 badgers). It cannot bite when every window ends
+    # real data (a handful of individuals). It cannot bite when every window ends
     # at `n_timepoints`, because `rest_contribution` returns all-ones at
     # `t == n_timepoints`; it bites any model with per-individual end times.
     s = _mh_setup(; n_t=10, sampling_period=[(2, 9) for _ in 1:6],

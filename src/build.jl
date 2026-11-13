@@ -71,14 +71,14 @@ Each individual's transitions are only summed over its own `sampling_period`
 (defaulting to `1:n_timepoints` when the user doesn't supply one: see
 [`epidemic_data`](@ref)), not the full time range. Outside that window there is no
 move to explain: nothing observes the individual, so the reference model (which
-this package matches) contributes no likelihood term there either. On the badger
-dataset the average window is under half the full 161 timepoints, so this roughly
+this package matches) contributes no likelihood term there either. When the
+average window is under half the series, as is common in field data, this roughly
 halves the per-gradient cost.
 
 ## Conditioning on entry: `entry_time` (+ `survival`)
 
 Many observation designs only START watching an individual partway through its
-life, a badger's first capture, a patient's enrolment. Before that entry time we
+life, an animal's first capture, a patient's enrolment. Before that entry time we
 know it was alive (else we would never have seen it), but we did not observe its
 disease dynamics. The likelihood should therefore, in the pre-entry window:
 
@@ -175,7 +175,7 @@ Levers a bespoke version can pull that the generic one cannot:
     `my_survival` to subtract back out. A bespoke pre-entry branch can compute the
     disease-MOVE directly (`log(infection)` / `log(1-progRate)` / …) in one
     transcendental, never forming `survival * move` at all. On a dataset with a
-    large pre-entry window (the badgers: ~9452 steps) this roughly halves the
+    large pre-entry window (thousands of steps) this roughly halves the
     gate's added cost.
 
   * **Skip work you know is zero.** The generic loop runs to `last_t` and scores
@@ -249,9 +249,9 @@ function _build_loglik(slp::F, et, surv) where {F}
             # absolute time 1. iFFBS imputes and stores the trajectory over
             # [first_t, last_t] only (iffbs_individual!: xᵢ = X[first_t:last_t, i])
             # and draws the initial state into X[first_t, i]. Reading X[1, i] here
-            # for a badger whose window starts later scores a cell iFFBS never
+            # for an individual whose window starts later scores a cell iFFBS never
             # touches: a stale X_init value uncoupled from the sampled trajectory.
-            # (`badger_starting_state` ignores its t arg and recomputes first_t
+            # (a starting-state function that ignores its t arg and recomputes first_t
             # internally, so the distribution was already correct; only the state
             # index it was scored against was wrong.)
             p0 = data.starting_state(model, data, X, i, first_t)
@@ -356,7 +356,7 @@ Summed over each individual's own `sampling_period`, matching
 The vector-returning contract above is what the latent sampler needs (the forward
 filter genuinely reads every state's weight). The likelihood needs exactly one
 entry — `w[X[t,i]]`: so going through the vector allocates one array per `(i,t)`
-and throws all but one element away. On the badger model that is ~187k
+and throws all but one element away. On a large model that is ~187k
 allocations per call, each an array of `Dual`s under AD.
 
 This is the same trap [`epidemic_loglik`](@ref) already avoids: it uses
@@ -376,8 +376,8 @@ and `data.observation_process`). So the recommended path is to give the scalar t
 [`epidemic_data`](@ref) once: as `observation_weight`, or as the second half of a
 both-supplied observation model: and then just call `epidemic_obs_loglik(data)`:
 it picks up the stored scalar automatically and takes the fast, allocation-free
-path. Pass these keywords here only to override what `data` stores (e.g. the badger
-model, which stores the full `capture × tests` vector for the filter but passes
+path. Pass these keywords here only to override what `data` stores (e.g. a
+model that stores the full `capture × tests` vector for the filter but passes
 only the `tests` factor here). When `data` carries no scalar and none is passed,
 the vector path is used, correct, just slower.
 """

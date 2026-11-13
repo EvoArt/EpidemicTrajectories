@@ -85,7 +85,7 @@ end
 end
 
 @testset "@survival: scales the live transitions and adds the deaths" begin
-    # The badger structure: S -> E -> I -> D, every step conditional on surviving.
+    # A four-state structure: S -> E -> I -> D, every step conditional on surviving.
     spec = @transitions [:S, :E, :I, :D] begin
         @survival surv death=:D
         S -> E = foi

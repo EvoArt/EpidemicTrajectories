@@ -721,7 +721,7 @@ A compact copy of a trajectory for a post-hoc residual archive.
 
 Trajectories are the whole cost of computing residuals after the fact, and that
 cost is storage, not compute. A state space has a handful of states, so `Int8`
-holds one exactly, and on the badger model (2391 individuals × 161 timepoints)
+holds one exactly, and on a large model (a few thousand individuals over ~160 timepoints)
 that is 385 KB per draw instead of 3.1 MB, i.e. 192 MB for 500 draws instead of
 1.5 GB.
 
@@ -792,7 +792,7 @@ Collect summaries during a fit, storing only the residuals and never the
 trajectories.
 
 This is the mode for a model whose `X` cannot be archived. Storage here is
-`m × n_stored` `Float64` per summary: for 2391 individuals and 500 stored draws
+`m × n_stored` `Float64` per summary: for a few thousand individuals and 500 stored draws
 that is 9.5 MB per summary, against 192 MB for even an `Int8` archive of the same
 draws and 1.5 GB for the raw `Int` ones. Nothing about `X` is kept.
 
@@ -804,7 +804,7 @@ timepoints, so the whole latent history is megabytes and none of this machinery 
 warranted. Reach for a bounded-memory route when the product
 `n_individuals × n_timepoints × n_draws` stops fitting.
 
-The badger model is the worked case where it does: 2391 × 161 is 385 KB per draw
+A large model is the case where it does: 385 KB per draw
 even as `Int8`, so a serious number of MCMC samples cannot be held in memory, and
 putting them in a chain object would exhaust it long before the sampler finished.
 This collector and [`BatchedArchive`](@ref) are the two routes that bound the
@@ -935,7 +935,7 @@ computation ever holds more than one batch in memory.
 This is the route for a model whose `X` is too big to keep in RAM: at small
 scale (the cattle model, say) just holding the draws is simpler and fine. Batching
 bounds the resident cost at `batch_size × per-draw size`, 19 MB at the default 50
-for the badger model: regardless of how many draws are archived in total, and
+for such a model: regardless of how many draws are archived in total, and
 regardless of how many are later read back.
 
 **Why archive at all, rather than [`SummaryCollector`](@ref)?** Because it keeps
@@ -956,7 +956,7 @@ it back lazily with [`archived_draws`](@ref).
 
 # Example
 ```julia
-arc = BatchedArchive("badger_archive", n_individuals; batch_size=50)
+arc = BatchedArchive("trajectories", n_individuals; batch_size=50)
 for sweep in 1:n_sweeps
     # ... one Gibbs sweep ...
     sweep % thin == 0 && archive_push!(arc, model, X)
@@ -964,7 +964,7 @@ end
 archive_close!(arc)
 
 # later, in a fresh session — one batch resident at a time
-R = trajectory_summaries((progression,), data, archived_draws("badger_archive"))
+R = trajectory_summaries((progression,), data, archived_draws("trajectories"))
 ```
 """
 mutable struct BatchedArchive

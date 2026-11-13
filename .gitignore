@@ -2,7 +2,6 @@ Manifest.toml
 /docs/build/
 /docs/Manifest.toml
 /examples/Manifest.toml
-#/badger_ref/
 *.jl.cov
 *.jl.*.cov
 *.jl.mem
@@ -21,8 +20,6 @@ smoke_err.txt
 
 # Root-level generated fit outputs (large JLD2/CSV draws)
 /outputs/
-/badger_out/
-/badger_ref/
 
 # Generated example artefacts (logs, flags, profile/scratch dumps)
 examples/*.log
@@ -31,9 +28,6 @@ examples/*.txt
 examples/outputs/
 # Large local reference/investigation data (not part of the package)
 /_upstream/
-/latest_badger_ref/
-/badger_variants/
-/examples/athena_badgers/
 
 # Archived trajectories from the showcase scripts (large, regenerated)
 examples/showcase/*.jld2
@@ -43,7 +37,7 @@ desired_api.jl
 walkthrough_cattle.jl
 walkthrough_cattle_check.jl
 
-# Local only: the badger data and its runner, papers and scratch output
+# Local only: papers and scratch output
 /*.pdf
 /read_log.py
 /examples/residuals_out/

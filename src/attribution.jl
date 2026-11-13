@@ -282,7 +282,7 @@ no meaningful share, and a `NaN` would poison a downstream mean.
 
 # Example
 ```julia
-# what fraction of infection pressure was environmental rather than from badgers?
+# what fraction of infection pressure was environmental rather than from other animals?
 ratio = FOIRatioSummary(:S => :E;
     components = (; background = foi_background, transmission = foi_transmission),
     numerator = :background)

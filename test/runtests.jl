@@ -2,7 +2,7 @@ using EpidemicTrajectories
 using Test
 using Random
 using StableRNGs: StableRNG
-using Statistics: mean, std
+using Statistics: mean, std, var
 using Serialization: Serialization
 
 # A test file NOT listed here silently does not run. Adding one is part of
@@ -16,5 +16,8 @@ using Serialization: Serialization
 
     # Exact marginalisation for independent individuals.
     include("hmm.jl")
+
+    # Weighted chains with sampled latents.
+    include("latent_hmm.jl")
 
 end

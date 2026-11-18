@@ -44,6 +44,11 @@ include("build.jl")
 # Exact marginalisation for independent individuals: after build.jl, alongside
 # the complete-path likelihood it integrates.
 include("hmm.jl")
+# Weighted chains with sampled latents (an HMM per individual plus continuous
+# or discrete latents the weights read).
+include("latents.jl")
+include("latent_hmm.jl")
+include("latent_sampler.jl")
 
 # After build.jl: `iffbs_mh.jl` calls `epidemic_conditional_loglik` as a default
 # argument, and its `IFFBSMHSampler` is what `epidemic_latent_sampler(; mh=true)`
@@ -56,6 +61,7 @@ include("diagnostics.jl")
 
 # Model specification
 export TransitionSpec, @transitions, @survival
+export WeightSpec
 
 # User-declared aggregates and their reversible updates
 export @aggregate, AggregateSpec, AggregateDeclaration, allocate_aggregates
@@ -91,6 +97,10 @@ export epidemic_simulator, epidemic_loglik, epidemic_obs_loglik, epidemic_latent
 # draws, and the independence checks.
 export epidemic_marginal_loglik, hmm_logliks, hmm_filter, hmm_sample!
 export require_independent, check_independent
+
+# Weighted chains with sampled latents.
+export @latents, Field, PerIndividual, Shared, LatentState, latent_state, restamp!
+export LatentHMMData, latent_hmm_data, current_state, acceptance_rates, check_local_messages
 
 # Trajectory summaries: residuals and other post-hoc, per-draw, per-individual
 # quantities computed from a sampled `X`. The fourth artefact generated from one

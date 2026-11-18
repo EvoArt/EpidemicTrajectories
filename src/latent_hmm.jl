@@ -79,8 +79,8 @@ and reads latent variables.
 - `observation_shared(model, data, i, key)`: anything the observation weights at
   every `t` with `shared_key(t) == key` need, computed once per key. It arrives
   as `shared`. Keys run from 1 to `n_keys`.
-- `latents`: an [`@latents`](@ref) declaration; `init`: the starting values as a
-  `NamedTuple` (see [`latent_state`](@ref)).
+- `latents`: an [`@latents`](@ref) declaration; `init`: starting values as a
+  `NamedTuple`; any left out are drawn as [`latent_state`](@ref) describes.
 - `per_evaluation(model, data)`: values worth computing once per likelihood call
   rather than once per step, e.g. rates tabulated by age group. Returned as a
   `NamedTuple` and merged into `model`.
@@ -94,7 +94,7 @@ and reads latent variables.
 - `extras...`: anything else, read as `data.name`.
 """
 function latent_hmm_data(; n_individuals, n_timepoints, trans_mat::WeightSpec, starting_state,
-                         latents::NamedTuple, init::NamedTuple,
+                         latents::NamedTuple, init::NamedTuple = (;),
                          observation_weights = nothing, observation_weight = nothing,
                          observation_shared = nothing, shared_key = identity, n_keys = n_timepoints,
                          sampling_period = nothing, per_evaluation = nothing, cache = nothing,
@@ -114,10 +114,11 @@ function latent_hmm_data(; n_individuals, n_timepoints, trans_mat::WeightSpec, s
     sp = sampling_period === nothing ? fill((1, n_timepoints), n_individuals) :
          [(Int(a), Int(b)) for (a, b) in sampling_period]
     length(sp) == n_individuals || throw(DimensionMismatch("sampling_period has $(length(sp)) entries"))
+    latents = map(k -> _resolve(k, n_timepoints), latents)
     for (name, k) in pairs(latents)
         k isa Field || continue
-        w = [k.touches(e) for e in 1:k.n]
-        all(e -> first(w[e]) <= first(w[e+1]) && last(w[e]) <= last(w[e+1]), 1:(k.n - 1)) ||
+        w = filter(!isempty, [k.touches(e) for e in 1:k.n])
+        all(e -> first(w[e]) <= first(w[e+1]) && last(w[e]) <= last(w[e+1]), 1:(length(w) - 1)) ||
             throw(ArgumentError("Field `$name`: touches(e) must not decrease with e"))
     end
     state = latent_state(latents, n_individuals; init...)
@@ -373,6 +374,7 @@ differentiated parameters cannot change are reused.
 """
 function epidemic_marginal_loglik(data::LatentHMMData)
     function marginal_loglik(model0, data::LatentHMMData, state::LatentState)
+        _allfinite(model0) || return _param_eltype(model0)(-Inf)    # a diverged HMC proposal
         data.current[] = state
         model = _with_per_eval(model0, data)
         _total_loglik(_source(data, model, state), data, model)
@@ -392,3 +394,44 @@ function hmm_logliks(model0, data::LatentHMMData, state::LatentState)
 end
 
 _nstates(::LatentHMMData{K}) where {K} = K
+
+"""
+    @weights(model; name = value, ...)
+    @weights(model, values...)
+
+What a `@shared` step function (the first form) or `observation_weights` (the
+second) returns, with every value converted to the parameters' number type.
+Plain numbers such as `0` or `1` can then sit beside values computed from the
+parameters, and every branch returns the same type, which Julia needs to
+compile the function well.
+
+```julia
+iseven(t) && return @weights(model; stay = 1, die = 1 - phi, live = phi)
+@weights(model, 0, L, L)
+```
+"""
+macro weights(args...)
+    T = gensym(:T)
+    conv(x) = :(convert($T, $(esc(x))))
+    if !isempty(args) && args[1] isa Expr && args[1].head == :parameters
+        length(args) == 2 || error("@weights(model; name = value, ...)")
+        model = args[2]
+        fields = map(args[1].args) do kw
+            (kw isa Expr && kw.head == :kw) || error("@weights: expected name = value, got $kw")
+            Expr(:kw, kw.args[1], conv(kw.args[2]))
+        end
+        body = Expr(:tuple, Expr(:parameters, fields...))
+    else
+        model = args[1]
+        body = Expr(:tuple, map(conv, args[2:end])...)
+    end
+    quote
+        $T = $(GlobalRef(@__MODULE__, :_param_eltype))($(esc(model)))
+        $body
+    end
+end
+
+_allfinite(x::Real) = isfinite(x)
+_allfinite(x::AbstractArray) = all(_allfinite, x)
+_allfinite(x::Union{Tuple,NamedTuple}) = all(_allfinite, x)
+_allfinite(x) = true

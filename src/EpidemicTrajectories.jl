@@ -49,6 +49,7 @@ include("hmm.jl")
 include("latents.jl")
 include("latent_hmm.jl")
 include("latent_sampler.jl")
+include("spatial.jl")
 
 # After build.jl: `iffbs_mh.jl` calls `epidemic_conditional_loglik` as a default
 # argument, and its `IFFBSMHSampler` is what `epidemic_latent_sampler(; mh=true)`
@@ -101,6 +102,8 @@ export require_independent, check_independent
 # Weighted chains with sampled latents.
 export @latents, Field, PerIndividual, Shared, LatentState, latent_state, restamp!
 export LatentHMMData, latent_hmm_data, current_state, acceptance_rates, check_local_messages
+export @weights
+export SpatialCaptures, spatial_captures, capture_loglik, caught, trapping, starting_centres, starting_detectors
 
 # Trajectory summaries: residuals and other post-hoc, per-draw, per-individual
 # quantities computed from a sampled `X`. The fourth artefact generated from one

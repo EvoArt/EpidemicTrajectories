@@ -19,5 +19,6 @@ using Serialization: Serialization
 
     # Weighted chains with sampled latents.
     include("latent_hmm.jl")
+    include("spatial.jl")
 
 end

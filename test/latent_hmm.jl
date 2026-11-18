@@ -1,4 +1,4 @@
-using Distributions: Normal, Bernoulli, logpdf, pdf
+using Distributions: Normal, Bernoulli, Poisson, Uniform, DiscreteUniform, logpdf, pdf
 using LinearAlgebra: Diagonal, SymTridiagonal, diag
 import ForwardDiff
 
@@ -197,6 +197,29 @@ import ForwardDiff
         mus = [(sampler(r, (;), st); st.values.mu[1, 1]) for _ in 1:8000]
         @test abs(mean(mus) - m) < 0.3 / sqrt(prec)
         @test 0.7 < var(mus) * prec < 1.4
+    end
+
+    @testset "Field index, default starting values, @weights" begin
+        f = Field(1, 3; prior = Normal(0, 1), index = t -> cld(t, 4))
+        d = latent_hmm_data(; n_individuals = 2, n_timepoints = 12, trans_mat = rw_spec,
+                            starting_state = (m, d, i) -> (1.0,), latents = (; S = f), y = zeros(12, 2))
+        k = d.latent_decls.S
+        @test [k.touches(e) for e in 1:3] == [1:5, 5:9, 9:12]
+        @test size(current_state(d).values.S) == (1, 3, 2)
+        lat = @latents begin
+            b ~ PerIndividual(DiscreteUniform(1, 5); observed = [3, missing, missing])
+            s ~ PerIndividual(model -> Bernoulli(model.p); observed = [1, missing, 1])
+            X ~ Shared(2, 4; prior = (Uniform(0, 1), Uniform(5, 6)))
+        end
+        st = EpidemicTrajectories.latent_state(lat, 3)
+        @test st.values.b[1] == 3 && all(in(1:5), st.values.b)
+        @test all(==(1), st.values.s)
+        @test all(0 .<= st.values.X[1, :] .<= 1) && all(5 .<= st.values.X[2, :] .<= 6)
+        g(model, z) = z ? @weights(model; a = 0, b = model.x) : @weights(model; a = model.x, b = 1)
+        D = ForwardDiff.Dual{Nothing,Float64,1}
+        @test g((; x = D(0.5)), true) isa NamedTuple{(:a, :b),Tuple{D,D}}
+        @test g((; x = 0.5), false) === (; a = 0.5, b = 1.0)
+        @test @weights((; x = 0.5), 0, 1) === (0.0, 1.0)
     end
 
     @testset "cache and gradients" begin

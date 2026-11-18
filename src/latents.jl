@@ -10,14 +10,18 @@
 abstract type LatentKind end
 
 """
-    Field(dim, n; prior, touches, scale = 1.0)
+    Field(dim, n; prior, index = nothing, touches = nothing, keys = nothing, scale = 1.0)
 
 A `dim`-vector for each individual at each of `n` elements, e.g. an activity
 centre per year.
 
 - `prior`: a univariate distribution used for every coordinate, or a tuple of
   them, one per coordinate.
-- `touches(e)`: the timepoints whose weights or observations read element `e`,
+- `index(t)`: the element in use at timepoint `t`, e.g. the year. The weights
+  and observations at `t` may read elements `index(t)` and `index(t) - 1` (a
+  move from last year's position). The sampler works out which timepoints each
+  element touches from this.
+- `touches(e)`: instead of `index`, the timepoints whose weights or observations read element `e`,
   as a range. The sampler scores a move of element `e` over these alone, so
   every timepoint that reads it must be in the range. Ranges must not decrease
   from one element to the next.
@@ -34,8 +38,31 @@ struct Field{P,W,KY} <: LatentKind
     keys::KY
     scale::Float64
 end
-Field(dim::Integer, n::Integer; prior, touches, keys = nothing, scale = 1.0) =
-    Field(Int(dim), Int(n), prior, touches, keys, Float64(scale))
+function Field(dim::Integer, n::Integer; prior, index = nothing, touches = nothing, keys = nothing, scale = 1.0)
+    (index === nothing) == (touches === nothing) &&
+        throw(ArgumentError("Field: give one of `index` or `touches`"))
+    Field(Int(dim), Int(n), prior, touches === nothing ? _ByIndex(index) : touches, keys, Float64(scale))
+end
+
+# touches worked out from index once the number of timepoints is known
+struct _ByIndex{F}; index::F; end
+struct _Windows; w::Vector{UnitRange{Int}}; end
+(w::_Windows)(e) = w.w[e]
+
+_resolve(k, T) = k
+function _resolve(k::Field{P,<:_ByIndex}, T) where {P}
+    idx = [k.touches.index(t) for t in 1:T]
+    firsts = [something(findfirst(==(e), idx), 0) for e in 1:k.n]
+    w = map(1:k.n) do e
+        firsts[e] == 0 && return (e == 1 ? 1 : 0):0
+        nxt = findfirst(>(0), view(firsts, (e + 1):k.n))
+        firsts[e]:(nxt === nothing ? T : firsts[e + nxt])
+    end
+    for e in 2:k.n      # elements never in use get an empty window in place
+        isempty(w[e]) && (w[e] = last(w[e - 1]):(last(w[e - 1]) - 1))
+    end
+    Field(k.dim, k.n, k.prior, _Windows(w), k.keys, k.scale)
+end
 
 """
     PerIndividual(prior; observed = nothing, allowed = nothing, scale = 1.0)
@@ -144,17 +171,19 @@ _shape(k::PerIndividual, N) = (N,)
 _shape(k::Shared, N) = (k.dim, k.n)
 
 """
-    latent_state(latents, n_individuals; init...)
+    latent_state(latents, n_individuals; rng = Xoshiro(1), init...)
 
 Starting values for every latent in `latents`, given as `name = array` keyword
 arguments with the shapes [`LatentState`](@ref) describes. Observed
 PerIndividual values replace the starting values where they are known.
+
+A latent left out is drawn from its prior. A PerIndividual whose prior depends
+on the parameters is filled in from its observed values instead.
 """
-function latent_state(latents::NamedTuple, N::Integer; init...)
+function latent_state(latents::NamedTuple, N::Integer; rng = Random.Xoshiro(1), init...)
     vals = map(keys(latents)) do name
-        haskey(init, name) || throw(ArgumentError("latent_state: no starting value for `$name`"))
         k = latents[name]
-        x = copy(init[name])
+        x = haskey(init, name) ? copy(init[name]) : _draw_init(rng, k, N, name)
         size(x) == _shape(k, N) ||
             throw(DimensionMismatch("latent `$name` should be $(_shape(k, N)), got $(size(x))"))
         if k isa PerIndividual && k.observed !== nothing
@@ -191,4 +220,25 @@ function _small_support(d)
     lo, hi = Distributions.minimum(d), Distributions.maximum(d)
     (isfinite(lo) && isfinite(hi) && hi - lo <= 1) || return nothing
     Int(lo):Int(hi)
+end
+
+# ---- starting values from the priors ----
+
+function _draw_init(rng, k::Union{Field,Shared}, N, name)
+    x = zeros(_shape(k, N))
+    for c in 1:k.dim
+        p = _coord_prior(k.prior, c)
+        p isa Distributions.Distribution || throw(ArgumentError("no starting value for `$name`"))
+        sel = selectdim(x, 1, c)
+        sel .= rand(rng, p, size(sel))
+    end
+    x
+end
+function _draw_init(rng, k::PerIndividual, N, name)
+    if !(k.prior isa Function)
+        return rand(rng, k.prior, N)
+    end
+    seen = k.observed === nothing ? [] : collect(skipmissing(k.observed))
+    isempty(seen) && throw(ArgumentError("no starting value for `$name`: its prior depends on the parameters"))
+    [rand(rng, seen) for _ in 1:N]
 end

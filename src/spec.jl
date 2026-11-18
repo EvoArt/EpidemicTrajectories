@@ -70,6 +70,24 @@ TransitionSpec(states, transitions, rate_fns) =
 TransitionSpec(states, transitions, rate_fns, coupling) =
     TransitionSpec(states, transitions, rate_fns, coupling, nothing)
 
+"""
+    WeightSpec(states, transitions, weight_fns, shared)
+
+Transitions whose values are non-negative weights rather than probabilities, from
+`@transitions ... :weights`. A weight may be a probability times a density, so it
+can exceed one and a row need not sum to one. Nothing is clamped and nothing is
+filled in: a self-transition exists only if it is declared.
+
+Used by [`latent_hmm_data`](@ref). The other model classes take a
+[`TransitionSpec`](@ref) only.
+"""
+struct WeightSpec{RF<:Tuple,S}
+    states::Vector{Symbol}
+    transitions::Vector{Tuple{Symbol,Symbol}}
+    rate_fns::RF
+    shared::S
+end
+
 # Rates may be written at three levels of sugar, in decreasing order of brevity:
 #
 #   S -> I = infection_func                      # a bare name: called for you
@@ -293,21 +311,39 @@ end
 ```
 
 A bare rate name `r` is then called as `r(model, data, i, t, shared)`.
+
+With the `:weights` tag the values are weights, not probabilities, and the macro
+returns a [`WeightSpec`](@ref): every edge must be declared, self-transitions
+included, and `@survival` is not allowed.
+
+```julia
+spec = @transitions [:pre, :alive, :dead] :weights begin
+    @shared step
+    pre -> pre     = shared.stay
+    pre -> alive   = shared.enter          # probability x entry density
+    alive -> alive = shared.survive
+    alive -> dead  = shared.die
+    dead -> dead   = 1
+end
+```
 """
 macro transitions(args...)
-    rest = collect(args)
-
-    while !isempty(rest) && rest[1] isa QuoteNode
-        tag = rest[1].value
+    # Tags may come before or after the state space.
+    rest = [a for a in args if !(a isa QuoteNode)]
+    weights = false
+    for a in args
+        a isa QuoteNode || continue
+        tag = a.value
         if tag == :individual
             # The only supported style; accepted for explicitness.
+        elseif tag == :weights
+            weights = true
         elseif tag in (:auto_self, :no_auto_self)
             error("@transitions takes no :$tag tag: a state's self-transition is " *
                   "always the probability its declared transitions leave")
         else
-            error("Unsupported @transitions tag: $tag (expected :individual)")
+            error("Unsupported @transitions tag: $tag (expected :individual or :weights)")
         end
-        rest = rest[2:end]
     end
 
     # An optional leading state_space fixes the state NUMBERING (state k in `X`
@@ -327,6 +363,8 @@ macro transitions(args...)
     shared_val = shared_expr === nothing ? :nothing : esc(shared_expr)
 
     trs, bare = _parse_transition_block(block, rate_args)
+    weights && bare !== nothing &&
+        error("@survival does not go with :weights; declare the death edges as weights")
     seen_states = unique(vcat(Symbol[t[1] for t in trs], Symbol[t[2] for t in trs]))
     trans_pairs = [:(($(QuoteNode(t[1])), $(QuoteNode(t[2])))) for t in trs]
     rates = [_wrap_rate_expr(t[3], rate_args) for t in trs]
@@ -350,6 +388,15 @@ macro transitions(args...)
                          Tuple{Symbol,Symbol}[$(bare_pairs...)],
                          ($(map(esc, bare_rates)...),),
                          nothing, $shared_val))
+    end
+
+    weights && return quote
+        WeightSpec(
+            $states_expr,
+            Tuple{Symbol,Symbol}[$(trans_pairs...)],
+            ($(map(esc, rates)...),),
+            $shared_val,
+        )
     end
 
     quote

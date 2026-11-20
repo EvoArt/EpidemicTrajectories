@@ -29,6 +29,14 @@ centre per year.
   [`latent_hmm_data`](@ref)) whose `observation_shared` value reads element `e`.
   By default every key met in `touches(e)`.
 - `scale`: starting random-walk scale (adapted during warm-up).
+- `moves`: extra moves of an individual's elements together, after the
+  one-element steps, each scored by the individual's full forward pass:
+  - `:pair`, each two consecutive elements in use moved by one common vector;
+  - `:shift`, every element in use moved by one common vector;
+  - `:scale`, the elements in use pulled towards or pushed away from their mean.
+  They help when consecutive elements are strongly tied, e.g. activity
+  centres linked by a narrow movement kernel, where one element at a time
+  can barely move. Default none.
 """
 struct Field{P,W,KY} <: LatentKind
     dim::Int
@@ -37,11 +45,16 @@ struct Field{P,W,KY} <: LatentKind
     touches::W
     keys::KY
     scale::Float64
+    moves::Tuple{Vararg{Symbol}}
 end
-function Field(dim::Integer, n::Integer; prior, index = nothing, touches = nothing, keys = nothing, scale = 1.0)
+const _FIELD_MOVES = (:pair, :shift, :scale)
+function Field(dim::Integer, n::Integer; prior, index = nothing, touches = nothing, keys = nothing, scale = 1.0,
+               moves = ())
     (index === nothing) == (touches === nothing) &&
         throw(ArgumentError("Field: give one of `index` or `touches`"))
-    Field(Int(dim), Int(n), prior, touches === nothing ? _ByIndex(index) : touches, keys, Float64(scale))
+    mv = Tuple(Symbol.(moves))
+    all(in(_FIELD_MOVES), mv) || throw(ArgumentError("Field: moves must be among $(_FIELD_MOVES), got $mv"))
+    Field(Int(dim), Int(n), prior, touches === nothing ? _ByIndex(index) : touches, keys, Float64(scale), mv)
 end
 
 # touches worked out from index once the number of timepoints is known
@@ -61,7 +74,7 @@ function _resolve(k::Field{P,<:_ByIndex}, T) where {P}
     for e in 2:k.n      # elements never in use get an empty window in place
         isempty(w[e]) && (w[e] = last(w[e - 1]):(last(w[e - 1]) - 1))
     end
-    Field(k.dim, k.n, k.prior, _Windows(w), k.keys, k.scale)
+    Field(k.dim, k.n, k.prior, _Windows(w), k.keys, k.scale, k.moves)
 end
 
 """

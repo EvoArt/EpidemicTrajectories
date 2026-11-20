@@ -8,9 +8,10 @@
 # of the individual's sweep. Elements are visited in window order, so the
 # backward message never includes a step an earlier element changed.
 
-mutable struct LatentSampler{D,SC}
+mutable struct LatentSampler{D,SC,MS}
     data::D
     scales::SC                     # per latent: Field n x N, PerIndividual N, Shared n
+    mscales::MS                    # per latent: a Field's joint moves (pair n x N, shift N, scale N)
     sweep::Int
     n_adapt::Int
     seed::UInt64
@@ -35,7 +36,10 @@ function epidemic_latent_sampler(data::LatentHMMData; n_adapt::Integer = 1000, s
         k isa Field ? fill(k.scale, k.n, N) :
         k isa PerIndividual ? fill(k.scale, N) : fill(k.scale, k.n)
     end
-    LatentSampler(data, sc, 0, Int(n_adapt), UInt64(seed), zeros(N),
+    ms = map(data.latent_decls) do k
+        (pair = fill(k.scale, k isa Field ? k.n : 0, N), shift = fill(k.scale, N), scale = fill(0.1, N))
+    end
+    LatentSampler(data, sc, ms, 0, Int(n_adapt), UInt64(seed), zeros(N),
                   Dict{Symbol,Float64}(), Dict{Symbol,Float64}(), Dict{Symbol,Float64}())
 end
 
@@ -62,7 +66,8 @@ function (s::LatentSampler)(rng::AbstractRNG, model0, state::LatentState)
         end
     end
     s.seconds[:shared] = get(s.seconds, :shared, 0.0) + @elapsed _update_shared!(rng, s, model, state, c)
-    tallies = [zeros(2 * length(data.latent_decls)) for _ in 1:data.n_individuals]
+    # per latent: one-element steps, then the :pair, :shift and :scale moves (accepted, tried)
+    tallies = [zeros(8 * length(data.latent_decls)) for _ in 1:data.n_individuals]
     s.seconds[:individual] = get(s.seconds, :individual, 0.0) + @elapsed begin
         Threads.@threads for i in 1:data.n_individuals
             r = Random.Xoshiro(hash((s.seed, s.sweep, i)))
@@ -72,7 +77,12 @@ function (s::LatentSampler)(rng::AbstractRNG, model0, state::LatentState)
     tl = reduce(+, tallies)
     for (n, name) in enumerate(keys(data.latent_decls))
         data.latent_decls[name] isa Shared && continue
-        s.accepted[name] = tl[2n-1]; s.tried[name] = tl[2n]
+        b = 8(n - 1)
+        s.accepted[name] = tl[b+1]; s.tried[name] = tl[b+2]
+        for (j, mv) in enumerate(_FIELD_MOVES)
+            tl[b+2j+2] > 0 || continue
+            s.accepted[Symbol(name, :_, mv)] = tl[b+2j+1]; s.tried[Symbol(name, :_, mv)] = tl[b+2j+2]
+        end
     end
     restamp!(state)
     c === nothing || (c.stamp = state.stamp)
@@ -174,13 +184,16 @@ function _update_individual!(rng, s::LatentSampler, model, state, c, i, tally)
     n = 0
     for (name, k) in pairs(data.latent_decls)
         n += 1
+        b = 8(n - 1)
         if k isa PerIndividual
             _is_free(k, i) || continue
             a = _move_per_individual!(rng, s, name, k, state.values[name], s.scales[name], model, c, i)
-            tally[2n-1] += a; tally[2n] += 1
+            tally[b+1] += a; tally[b+2] += 1
         elseif k isa Field
             a, t = _sweep_field!(rng, s, k, state.values[name], s.scales[name], model, c, i)
-            tally[2n-1] += a; tally[2n] += t
+            tally[b+1] += a; tally[b+2] += t
+            isempty(k.moves) || _field_moves!(rng, s, name, k, state.values[name], s.mscales[name], model, c, i,
+                                              view(tally, (b+3):(b+8)))
         end
     end
 end
@@ -289,6 +302,72 @@ function _sweep_field!(rng, s::LatentSampler, k::Field, S, scales, model, c, i)
     s.hist[i] = (c === nothing ? _ind_loglik(_Fresh(), data, model, i) : _ind_loglik(_FromWeights(c), data, model, i)) +
                 _ind_param_priors(data, model, i)
     acc, tried
+end
+
+# ---- joint moves of an individual's Field elements ----
+#
+# After the one-element steps: moves of several elements of individual i at once,
+# each a Metropolis step scored by i's full forward pass and the elements' priors.
+#   :pair   each two consecutive elements in use, moved by one common vector
+#   :shift  every element in use, moved by one common vector
+#   :scale  every element in use, pulled towards or pushed from their mean by a
+#           factor exp(u), u ~ N(0, s^2); log Jacobian dim * (m - 1) * u for m elements
+# The proposals are symmetric. Scales adapt in warm-up like the one-element steps.
+function _field_moves!(rng, s::LatentSampler, name, k::Field, S, ms, model, c, i, tally)
+    data = s.data
+    lo, hi = data.sampling_period[i]
+    E = [e for e in 1:k.n if (w = k.touches(e); max(first(w), lo) <= min(last(w), hi))]
+    isempty(E) && return
+    reads_obs = name in _cache_latents(data)
+    src = (c === nothing || reads_obs) ? _OneFresh(c) : _FromWeights(c)
+    lprior(es) = sum(e -> _vec_logprior(k.prior, view(S, :, e, i)), es; init = 0.0)
+    old = zeros(k.dim, k.n)
+    # propose by `move!` (writing into S), accept or put back; returns whether accepted
+    function step!(es, move!, logjac)
+        for e in es, d in 1:k.dim; old[d, e] = S[d, e, i]; end
+        before = lprior(es)
+        move!()
+        after = lprior(es)
+        if isfinite(after)
+            nl = _ind_loglik(src, data, model, i) + _ind_param_priors(data, model, i)
+            if isfinite(nl) && log(rand(rng)) < nl - s.hist[i] + after - before + logjac
+                s.hist[i] = nl
+                if c !== nothing && reads_obs
+                    for key in 1:data.n_keys; c.shared[key, i] = _obs_shared(data, model, i, key); end
+                    for t in lo:hi
+                        c.weights[t, i] = _store(data, data.observation(model, data, i, t, c.shared[data.shared_key(t), i]))
+                    end
+                end
+                return true
+            end
+        end
+        for e in es, d in 1:k.dim; S[d, e, i] = old[d, e]; end
+        false
+    end
+    if :pair in k.moves
+        for j in 1:(length(E) - 1)
+            e1, e2 = E[j], E[j+1]
+            sc = ms.pair[e1, i]
+            v = sc .* randn(rng, k.dim)
+            a = step!((e1, e2), () -> (for d in 1:k.dim; S[d, e1, i] += v[d]; S[d, e2, i] += v[d]; end), 0.0)
+            tally[1] += a; tally[2] += 1
+            ms.pair[e1, i] = _adapt(s, sc, a)
+        end
+    end
+    if :shift in k.moves
+        v = ms.shift[i] .* randn(rng, k.dim)
+        a = step!(E, () -> (for e in E, d in 1:k.dim; S[d, e, i] += v[d]; end), 0.0)
+        tally[3] += a; tally[4] += 1
+        ms.shift[i] = _adapt(s, ms.shift[i], a)
+    end
+    if :scale in k.moves && length(E) > 1
+        u = ms.scale[i] * randn(rng)
+        m = [sum(S[d, e, i] for e in E) / length(E) for d in 1:k.dim]
+        a = step!(E, () -> (for e in E, d in 1:k.dim; S[d, e, i] = m[d] + exp(u) * (S[d, e, i] - m[d]); end),
+                  k.dim * (length(E) - 1) * u)
+        tally[5] += a; tally[6] += 1
+        ms.scale[i] = _adapt(s, ms.scale[i], a)
+    end
 end
 
 # log of f * (steps l..h) * B, f being the forward vector after l-1 (the start

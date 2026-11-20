@@ -131,6 +131,41 @@ import ForwardDiff
         end
     end
 
+    @testset "joint field moves against the exact posterior" begin
+        lat_m = @latents begin
+            S ~ Field(1, T; prior = Normal(0, s0), touches = e -> e:min(e + 1, T), moves = (:pair, :shift, :scale))
+        end
+        rwm = latent_hmm_data(; n_individuals = N, n_timepoints = T, trans_mat = rw_spec,
+                              starting_state = (m, d, i) -> (1.0,), observation_weights = rw_obs,
+                              latents = lat_m, init = (; S = reshape(copy(yobs), 1, T, N)), y = yobs)
+        Q = SymTridiagonal(fill(1 / s0^2 + 1 / τ^2, T) .+ [1; fill(2, T - 2); 1] ./ σ^2, fill(-1 / σ^2, T - 1))
+        Σ = inv(Matrix(Q))
+        sampler = epidemic_latent_sampler(rwm; n_adapt = 500)
+        state = current_state(rwm)
+        r = StableRNG(4)
+        for _ in 1:500; sampler(r, rw_model, state); end
+        draws = zeros(T, N, 6000)
+        moves = (:S_pair, :S_shift, :S_scale)
+        accepted = Dict(mv => 0.0 for mv in moves); tried = Dict(mv => 0.0 for mv in moves)
+        for k in 1:6000
+            sampler(r, rw_model, state)
+            draws[:, :, k] .= state.values.S[1, :, :]
+            for mv in moves
+                accepted[mv] += get(sampler.accepted, mv, 0.0); tried[mv] += get(sampler.tried, mv, 0.0)
+            end
+        end
+        for i in 1:N
+            m = Σ * (yobs[:, i] ./ τ^2)
+            @test maximum(abs.(vec(mean(draws[:, i, :]; dims = 2)) .- m) ./ sqrt.(diag(Σ))) < 0.3
+            v = vec(var(draws[:, i, :]; dims = 2))
+            @test all(0.7 .< v ./ diag(Σ) .< 1.4)
+        end
+        for mv in moves      # every move used, and accepted at a sensible rate over the run
+            @test tried[mv] > 0 && 0.1 < accepted[mv] / tried[mv] < 0.9
+        end
+        @test_throws ArgumentError Field(1, T; prior = Normal(), index = identity, moves = (:jump,))
+    end
+
     @testset "per-individual latent against enumeration" begin
         # z ~ Bernoulli(p) per individual changes the a -> b rate
         N2, T2 = 4, 6

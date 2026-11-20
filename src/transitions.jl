@@ -249,6 +249,25 @@ function _param_eltype(model)
     return (T === Union{} || T === Bool) ? Float64 : T
 end
 
+# The same, for a NamedTuple, worked out from its type. This is called at every
+# step of every individual. For a model with a few fields the compiler folds
+# the run-time version above to a constant; with a few dozen (a large latent
+# model, with its per-evaluation values merged in) it does not, and the
+# run-time promotion was most of the cost of a gradient.
+#
+# Not `@generated`: a generator runs in the world ET was loaded in, so it cannot
+# see promotion rules added later (ForwardDiff's), and gave `Real` for duals.
+# `:foldable` lets the compiler evaluate this at compile time instead, in the
+# caller's world.
+Base.@assume_effects :foldable function _param_eltype_of(::Type{NT}) where {NT<:NamedTuple}
+    T = Union{}
+    for X in fieldtypes(NT)
+        T = promote_type(T, X <: Number ? X : X <: AbstractArray ? eltype(X) : Union{})
+    end
+    (T === Union{} || T === Bool) ? Float64 : T
+end
+@inline _param_eltype(model::NamedTuple) = _param_eltype_of(typeof(model))
+
 @inline function _sample_categorical(rng, probs)
     u = rand(rng)
     c = 0.0

@@ -220,9 +220,16 @@ _store(::LatentHMMData{K}, w) where {K} = w === nothing ? ntuple(_ -> 1.0, Val(K
 
 # Weight by the observation (`nothing`: no observation at t), rescaling only when
 # the total drifts far from 1. Returns the vector and the factor taken out.
+#
+# The factor is the total's plain value (`_strip`), not the total itself. That
+# is exact: the factor goes into the log likelihood as a constant and the
+# derivative stays in the vector. Rescaling by a dual-number total instead
+# breaks when the total is below ~1e-154, as a capture likelihood can be:
+# the derivative of `inv(s)` is -1/s^2, which overflows, and every entry of
+# the gradient becomes NaN while the log likelihood stays finite.
 @inline function _obs_step(a, w)
     a = w === nothing ? a : map(*, a, w)
-    s = sum(a)
+    s = _strip(sum(a))
     (1e-100 < s < 1e100) && return a, one(s)
     s > 0 || return a, s
     r = inv(s)

@@ -247,4 +247,25 @@ import ForwardDiff
             @test g ≈ fd rtol = 1e-5
         end
     end
+
+    @testset "tiny forward totals and large parameter sets" begin
+        # a forward total far below 1e-154 used to give NaN derivatives
+        a = (ForwardDiff.Dual(1e-170, 2.0), ForwardDiff.Dual(3e-171, 1.0))
+        b, z = EpidemicTrajectories._obs_step(a, nothing)
+        @test z isa Float64 && z ≈ 1.3e-170
+        @test all(x -> all(isfinite, ForwardDiff.partials(x)), b)
+        @test ForwardDiff.value(sum(b)) ≈ 1
+        @test ForwardDiff.partials(b[1])[1] ≈ 2.0 / z
+
+        # the parameter type from a NamedTuple's type agrees with the run-time
+        # version, and costs nothing however many fields there are
+        nt = (; a = 1.0, b = [1, 2], c = :x, d = ForwardDiff.Dual(1.0, 1.0), e = (1.0, 2.0), f = true)
+        @test EpidemicTrajectories._param_eltype(nt) === typeof(nt.d)
+        @test EpidemicTrajectories._param_eltype((; flag = true)) === Float64
+        @test EpidemicTrajectories._param_eltype((; n = :none)) === Float64
+        big = NamedTuple{Tuple(Symbol("p", k) for k in 1:60)}(Tuple(ForwardDiff.Dual(float(k), 1.0) for k in 1:60))
+        @test EpidemicTrajectories._param_eltype(big) === typeof(big.p1)
+        EpidemicTrajectories._param_eltype(big)
+        @test (@allocated EpidemicTrajectories._param_eltype(big)) == 0
+    end
 end

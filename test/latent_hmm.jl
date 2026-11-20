@@ -133,7 +133,7 @@ import ForwardDiff
 
     @testset "joint field moves against the exact posterior" begin
         lat_m = @latents begin
-            S ~ Field(1, T; prior = Normal(0, s0), touches = e -> e:min(e + 1, T), moves = (:pair, :shift, :scale))
+            S ~ Field(1, T; prior = Normal(0, s0), touches = e -> e:min(e + 1, T), moves = (:pair, :shift, :scale, :neighbour))
         end
         rwm = latent_hmm_data(; n_individuals = N, n_timepoints = T, trans_mat = rw_spec,
                               starting_state = (m, d, i) -> (1.0,), observation_weights = rw_obs,
@@ -145,7 +145,7 @@ import ForwardDiff
         r = StableRNG(4)
         for _ in 1:500; sampler(r, rw_model, state); end
         draws = zeros(T, N, 6000)
-        moves = (:S_pair, :S_shift, :S_scale)
+        moves = (:S_pair, :S_shift, :S_scale, :S_neighbour)
         accepted = Dict(mv => 0.0 for mv in moves); tried = Dict(mv => 0.0 for mv in moves)
         for k in 1:6000
             sampler(r, rw_model, state)

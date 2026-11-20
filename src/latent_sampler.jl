@@ -37,7 +37,8 @@ function epidemic_latent_sampler(data::LatentHMMData; n_adapt::Integer = 1000, s
         k isa PerIndividual ? fill(k.scale, N) : fill(k.scale, k.n)
     end
     ms = map(data.latent_decls) do k
-        (pair = fill(k.scale, k isa Field ? k.n : 0, N), shift = fill(k.scale, N), scale = fill(0.1, N))
+        (pair = fill(k.scale, k isa Field ? k.n : 0, N), shift = fill(k.scale, N), scale = fill(0.1, N),
+         neighbour = fill(k.scale, k isa Field ? k.n : 0, N))
     end
     LatentSampler(data, sc, ms, 0, Int(n_adapt), UInt64(seed), zeros(N),
                   Dict{Symbol,Float64}(), Dict{Symbol,Float64}(), Dict{Symbol,Float64}())
@@ -66,8 +67,8 @@ function (s::LatentSampler)(rng::AbstractRNG, model0, state::LatentState)
         end
     end
     s.seconds[:shared] = get(s.seconds, :shared, 0.0) + @elapsed _update_shared!(rng, s, model, state, c)
-    # per latent: one-element steps, then the :pair, :shift and :scale moves (accepted, tried)
-    tallies = [zeros(8 * length(data.latent_decls)) for _ in 1:data.n_individuals]
+    # per latent: one-element steps, then the :pair, :shift, :scale and :neighbour moves (accepted, tried)
+    tallies = [zeros(10 * length(data.latent_decls)) for _ in 1:data.n_individuals]
     s.seconds[:individual] = get(s.seconds, :individual, 0.0) + @elapsed begin
         Threads.@threads for i in 1:data.n_individuals
             r = Random.Xoshiro(hash((s.seed, s.sweep, i)))
@@ -77,7 +78,7 @@ function (s::LatentSampler)(rng::AbstractRNG, model0, state::LatentState)
     tl = reduce(+, tallies)
     for (n, name) in enumerate(keys(data.latent_decls))
         data.latent_decls[name] isa Shared && continue
-        b = 8(n - 1)
+        b = 10(n - 1)
         s.accepted[name] = tl[b+1]; s.tried[name] = tl[b+2]
         for (j, mv) in enumerate(_FIELD_MOVES)
             tl[b+2j+2] > 0 || continue
@@ -184,7 +185,7 @@ function _update_individual!(rng, s::LatentSampler, model, state, c, i, tally)
     n = 0
     for (name, k) in pairs(data.latent_decls)
         n += 1
-        b = 8(n - 1)
+        b = 10(n - 1)
         if k isa PerIndividual
             _is_free(k, i) || continue
             a = _move_per_individual!(rng, s, name, k, state.values[name], s.scales[name], model, c, i)
@@ -193,7 +194,7 @@ function _update_individual!(rng, s::LatentSampler, model, state, c, i, tally)
             a, t = _sweep_field!(rng, s, k, state.values[name], s.scales[name], model, c, i)
             tally[b+1] += a; tally[b+2] += t
             isempty(k.moves) || _field_moves!(rng, s, name, k, state.values[name], s.mscales[name], model, c, i,
-                                              view(tally, (b+3):(b+8)))
+                                              view(tally, (b+3):(b+10)))
         end
     end
 end
@@ -312,7 +313,13 @@ end
 #   :shift  every element in use, moved by one common vector
 #   :scale  every element in use, pulled towards or pushed from their mean by a
 #           factor exp(u), u ~ N(0, s^2); log Jacobian dim * (m - 1) * u for m elements
-# The proposals are symmetric. Scales adapt in warm-up like the one-element steps.
+#   :neighbour  each element in use with a neighbour in use, proposed close to the
+#           previous or the next element (one picked at random): N(neighbour, s^2).
+#           It moves a jump between consecutive elements to the next step, or
+#           removes it, in one move, which small steps cannot. The proposal does
+#           not depend on the element's own value, so the ratio carries
+#           q(old) / q(new), q the mixture over its neighbours (unchanged by the move).
+# The other proposals are symmetric. Scales adapt in warm-up like the one-element steps.
 function _field_moves!(rng, s::LatentSampler, name, k::Field, S, ms, model, c, i, tally)
     data = s.data
     lo, hi = data.sampling_period[i]
@@ -367,6 +374,22 @@ function _field_moves!(rng, s::LatentSampler, name, k::Field, S, ms, model, c, i
                   k.dim * (length(E) - 1) * u)
         tally[5] += a; tally[6] += 1
         ms.scale[i] = _adapt(s, ms.scale[i], a)
+    end
+    if :neighbour in k.moves
+        inE = falses(k.n); inE[E] .= true
+        for e in E
+            nb = [x for x in (e - 1, e + 1) if 1 <= x <= k.n && inE[x]]
+            isempty(nb) && continue
+            sc = ms.neighbour[e, i]
+            # log density of the proposal at x: equal mixture of N(S[:, n, i], sc^2 I) over nb
+            lq(x) = logsumexp([-sum(abs2, x .- view(S, :, n, i)) / (2sc^2) for n in nb]) - log(length(nb)) -
+                    k.dim * log(sc)
+            xo = S[:, e, i]
+            xn = S[:, rand(rng, nb), i] .+ sc .* randn(rng, k.dim)
+            a = step!((e,), () -> (for d in 1:k.dim; S[d, e, i] = xn[d]; end), lq(xo) - lq(xn))
+            tally[7] += a; tally[8] += 1
+            ms.neighbour[e, i] = _adapt(s, sc, a)
+        end
     end
 end
 

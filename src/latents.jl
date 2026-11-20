@@ -33,7 +33,9 @@ centre per year.
   one-element steps, each scored by the individual's full forward pass:
   - `:pair`, each two consecutive elements in use moved by one common vector;
   - `:shift`, every element in use moved by one common vector;
-  - `:scale`, the elements in use pulled towards or pushed away from their mean.
+  - `:scale`, the elements in use pulled towards or pushed away from their mean;
+  - `:neighbour`, each element in use proposed close to the previous or the next
+    one, which moves or removes a jump between consecutive elements at once.
   They help when consecutive elements are strongly tied, e.g. activity
   centres linked by a narrow movement kernel, where one element at a time
   can barely move. Default none.
@@ -47,7 +49,7 @@ struct Field{P,W,KY} <: LatentKind
     scale::Float64
     moves::Tuple{Vararg{Symbol}}
 end
-const _FIELD_MOVES = (:pair, :shift, :scale)
+const _FIELD_MOVES = (:pair, :shift, :scale, :neighbour)
 function Field(dim::Integer, n::Integer; prior, index = nothing, touches = nothing, keys = nothing, scale = 1.0,
                moves = ())
     (index === nothing) == (touches === nothing) &&

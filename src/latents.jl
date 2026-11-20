@@ -39,8 +39,21 @@ centre per year.
   They help when consecutive elements are strongly tied, e.g. activity
   centres linked by a narrow movement kernel, where one element at a time
   can barely move. Default none.
+- `pgas`: also redraw each individual's whole run of elements in use by
+  particle Gibbs with ancestor sampling (Lindsten, Jordan and Schön 2014),
+  once per sweep. The hidden chain is summed out within each particle. Needs
+  `index`. A NamedTuple:
+  - `particles` (default 32);
+  - `scales`, the sds of normal proposals around the previous element, one
+    mixture component each (default `(scale,)`);
+  - `anchors`, optional, a `dim x n x N` array of points to also propose
+    around (`NaN` for none), e.g. the year's mean capture location; data, not
+    the current values;
+  - `anchor_scale`, their sd (default `scale`).
+  Every proposal also includes the prior. An element with neither a previous
+  element nor an anchor is proposed from the prior.
 """
-struct Field{P,W,KY} <: LatentKind
+struct Field{P,W,KY,G} <: LatentKind
     dim::Int
     n::Int
     prior::P
@@ -48,15 +61,26 @@ struct Field{P,W,KY} <: LatentKind
     keys::KY
     scale::Float64
     moves::Tuple{Vararg{Symbol}}
+    pgas::G
 end
 const _FIELD_MOVES = (:pair, :shift, :scale, :neighbour)
 function Field(dim::Integer, n::Integer; prior, index = nothing, touches = nothing, keys = nothing, scale = 1.0,
-               moves = ())
+               moves = (), pgas = nothing)
     (index === nothing) == (touches === nothing) &&
         throw(ArgumentError("Field: give one of `index` or `touches`"))
     mv = Tuple(Symbol.(moves))
     all(in(_FIELD_MOVES), mv) || throw(ArgumentError("Field: moves must be among $(_FIELD_MOVES), got $mv"))
-    Field(Int(dim), Int(n), prior, touches === nothing ? _ByIndex(index) : touches, keys, Float64(scale), mv)
+    pg = nothing
+    if pgas !== nothing
+        index === nothing && throw(ArgumentError("Field: pgas needs `index`"))
+        a = get(pgas, :anchors, nothing)
+        pg = (particles = Int(get(pgas, :particles, 32)),
+              scales = Tuple(Float64.(get(pgas, :scales, (scale,)))),
+              anchors = a === nothing ? nothing : Array{Float64,3}(a),
+              anchor_scale = Float64(get(pgas, :anchor_scale, scale)))
+        pg.particles >= 2 || throw(ArgumentError("Field: pgas needs at least 2 particles"))
+    end
+    Field(Int(dim), Int(n), prior, touches === nothing ? _ByIndex(index) : touches, keys, Float64(scale), mv, pg)
 end
 
 # touches worked out from index once the number of timepoints is known
@@ -76,7 +100,7 @@ function _resolve(k::Field{P,<:_ByIndex}, T) where {P}
     for e in 2:k.n      # elements never in use get an empty window in place
         isempty(w[e]) && (w[e] = last(w[e - 1]):(last(w[e - 1]) - 1))
     end
-    Field(k.dim, k.n, k.prior, _Windows(w), k.keys, k.scale, k.moves)
+    Field(k.dim, k.n, k.prior, _Windows(w), k.keys, k.scale, k.moves, k.pgas)
 end
 
 """

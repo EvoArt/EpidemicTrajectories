@@ -166,6 +166,36 @@ import ForwardDiff
         @test_throws ArgumentError Field(1, T; prior = Normal(), index = identity, moves = (:jump,))
     end
 
+    @testset "pgas against the exact posterior" begin
+        lat_p = @latents begin
+            S ~ Field(1, T; prior = Normal(0, s0), index = identity,
+                      pgas = (particles = 16, scales = (σ,), anchors = reshape(copy(yobs), 1, T, N), anchor_scale = τ))
+        end
+        rwp = latent_hmm_data(; n_individuals = N, n_timepoints = T, trans_mat = rw_spec,
+                              starting_state = (m, d, i) -> (1.0,), observation_weights = rw_obs,
+                              latents = lat_p, init = (; S = reshape(copy(yobs), 1, T, N)), y = yobs)
+        Q = SymTridiagonal(fill(1 / s0^2 + 1 / τ^2, T) .+ [1; fill(2, T - 2); 1] ./ σ^2, fill(-1 / σ^2, T - 1))
+        Σ = inv(Matrix(Q))
+        sampler = epidemic_latent_sampler(rwp; n_adapt = 300)
+        state = current_state(rwp)
+        r = StableRNG(5)
+        for _ in 1:300; sampler(r, rw_model, state); end
+        draws = zeros(T, N, 4000); changed = 0.0; tried = 0.0
+        for k in 1:4000
+            sampler(r, rw_model, state)
+            draws[:, :, k] .= state.values.S[1, :, :]
+            changed += get(sampler.accepted, :S_pgas, 0.0); tried += get(sampler.tried, :S_pgas, 0.0)
+        end
+        for i in 1:N
+            m = Σ * (yobs[:, i] ./ τ^2)
+            @test maximum(abs.(vec(mean(draws[:, i, :]; dims = 2)) .- m) ./ sqrt.(diag(Σ))) < 0.3
+            v = vec(var(draws[:, i, :]; dims = 2))
+            @test all(0.7 .< v ./ diag(Σ) .< 1.4)
+        end
+        @test tried > 0 && changed / tried > 0.5      # it does redraw the paths
+        @test_throws ArgumentError Field(1, T; prior = Normal(), touches = e -> e:e, pgas = (particles = 8,))
+    end
+
     @testset "per-individual latent against enumeration" begin
         # z ~ Bernoulli(p) per individual changes the a -> b rate
         N2, T2 = 4, 6

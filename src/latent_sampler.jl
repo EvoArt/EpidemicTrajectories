@@ -67,8 +67,8 @@ function (s::LatentSampler)(rng::AbstractRNG, model0, state::LatentState)
         end
     end
     s.seconds[:shared] = get(s.seconds, :shared, 0.0) + @elapsed _update_shared!(rng, s, model, state, c)
-    # per latent: one-element steps, then the :pair, :shift, :scale and :neighbour moves (accepted, tried)
-    tallies = [zeros(10 * length(data.latent_decls)) for _ in 1:data.n_individuals]
+    # per latent: one-element steps, the :pair, :shift, :scale and :neighbour moves, then pgas (changed, tried)
+    tallies = [zeros(12 * length(data.latent_decls)) for _ in 1:data.n_individuals]
     s.seconds[:individual] = get(s.seconds, :individual, 0.0) + @elapsed begin
         Threads.@threads for i in 1:data.n_individuals
             r = Random.Xoshiro(hash((s.seed, s.sweep, i)))
@@ -78,9 +78,9 @@ function (s::LatentSampler)(rng::AbstractRNG, model0, state::LatentState)
     tl = reduce(+, tallies)
     for (n, name) in enumerate(keys(data.latent_decls))
         data.latent_decls[name] isa Shared && continue
-        b = 10(n - 1)
+        b = 12(n - 1)
         s.accepted[name] = tl[b+1]; s.tried[name] = tl[b+2]
-        for (j, mv) in enumerate(_FIELD_MOVES)
+        for (j, mv) in enumerate((_FIELD_MOVES..., :pgas))
             tl[b+2j+2] > 0 || continue
             s.accepted[Symbol(name, :_, mv)] = tl[b+2j+1]; s.tried[Symbol(name, :_, mv)] = tl[b+2j+2]
         end
@@ -185,7 +185,7 @@ function _update_individual!(rng, s::LatentSampler, model, state, c, i, tally)
     n = 0
     for (name, k) in pairs(data.latent_decls)
         n += 1
-        b = 10(n - 1)
+        b = 12(n - 1)
         if k isa PerIndividual
             _is_free(k, i) || continue
             a = _move_per_individual!(rng, s, name, k, state.values[name], s.scales[name], model, c, i)
@@ -195,6 +195,9 @@ function _update_individual!(rng, s::LatentSampler, model, state, c, i, tally)
             tally[b+1] += a; tally[b+2] += t
             isempty(k.moves) || _field_moves!(rng, s, name, k, state.values[name], s.mscales[name], model, c, i,
                                               view(tally, (b+3):(b+10)))
+            if k.pgas !== nothing
+                tally[b+11] += _pgas_field!(rng, s, name, k, state.values[name], model, c, i); tally[b+12] += 1
+            end
         end
     end
 end
@@ -391,6 +394,144 @@ function _field_moves!(rng, s::LatentSampler, name, k::Field, S, ms, model, c, i
             ms.neighbour[e, i] = _adapt(s, sc, a)
         end
     end
+end
+
+# ---- particle Gibbs with ancestor sampling over an individual's Field run ----
+#
+# One conditional SMC sweep over individual i's elements in use, E[1..m] (an
+# `index` Field). Step j proposes element E[j] and runs the forward pass over
+# the timepoints from the first of E[j]'s window up to the one before E[j+1]'s:
+# those read only E[j] and E[j-1]. Each particle carries its path and its
+# normalised forward vector, so the hidden chain is summed out exactly
+# (Rao-Blackwellised). The current path is the reference particle. Its
+# ancestor at each step is drawn with weights that include the rest of the
+# reference path, through backward messages computed once along it (ancestor
+# sampling, Lindsten, Jordan and Schön 2014). Proposal: an equal mixture of
+# normals around the ancestor's previous element (one per scale), a normal
+# around the anchor (if any), and the prior. Returns whether the path changed.
+_prior_draw(rng, prior::Tuple, D) = [rand(rng, prior[d]) for d in 1:D]
+_prior_draw(rng, prior, D) = [rand(rng, prior) for _ in 1:D]
+
+function _pgas_field!(rng, s::LatentSampler, name, k::Field, S, model, c, i)
+    data = s.data
+    lo, hi = data.sampling_period[i]
+    lo <= hi || return false
+    E = [e for e in 1:k.n if (w = k.touches(e); max(first(w), lo) <= min(last(w), hi))]
+    m = length(E)
+    m == 0 && return false
+    pg = k.pgas; P = pg.particles; D = k.dim; K = _nstates(data)
+    cuts = [j == m ? hi : first(k.touches(E[j+1])) - 1 for j in 1:m]
+    starts = [j == 1 ? lo : cuts[j-1] + 1 for j in 1:m]
+    ref = S[:, E, i]
+    # backward messages along the reference: B[t - lo + 2] is the message after t
+    B = Vector{NTuple{K,Float64}}(undef, hi - lo + 2)
+    B[end] = ntuple(_ -> 1.0, Val(K))
+    for t in hi:-1:(lo + 1)
+        b = _wbwd(_wmul(_cur_weights(nothing, data, model, i, t), B[t - lo + 2]), data, model, i, t)
+        B[t - lo + 1], _ = _tnorm(b)
+    end
+    # the forward pass over step j with E[j-1] = prev and E[j] = cur, from the
+    # normalised vector f; returns the normalised vector and the log increment
+    function window(f, j, prev, cur)
+        j > 1 && (for d in 1:D; S[d, E[j-1], i] = prev[d]; end)
+        for d in 1:D; S[d, E[j], i] = cur[d]; end
+        a = j == 1 ? _start(data, model, i) : f
+        ll = 0.0
+        key = -1; sh = nothing
+        for t in starts[j]:cuts[j]
+            kt = data.shared_key(t)
+            kt == key || (key = kt; sh = _obs_shared(data, model, i, kt))
+            a, z = _obs_step(_wfwd(a, data, model, i, t), _obsw(data.observation(model, data, i, t, sh)))
+            z > 0 || return a, -Inf
+            isone(z) || (ll += log(z))
+        end
+        sa = sum(a)
+        sa > 0 || return a, -Inf
+        map(x -> x / sa, a), ll + log(sa)
+    end
+    lgauss(x, mu, sd) = -sum(abs2, x .- mu) / (2sd^2) - D * log(sd) - D / 2 * log(2pi)
+    function comps(j, prev)
+        cs = Tuple{Vector{Float64},Float64}[]
+        j > 1 && (for sd in pg.scales; push!(cs, (prev, sd)); end)
+        if pg.anchors !== nothing
+            an = pg.anchors[:, E[j], i]
+            all(isfinite, an) && push!(cs, (an, pg.anchor_scale))
+        end
+        cs
+    end
+    function propose(j, prev)
+        cs = comps(j, prev); r = rand(rng, 1:(length(cs) + 1))
+        r > length(cs) ? _prior_draw(rng, k.prior, D) : cs[r][1] .+ cs[r][2] .* randn(rng, D)
+    end
+    function logq(j, prev, x)
+        cs = comps(j, prev)
+        logsumexp([[lgauss(x, mu, sd) for (mu, sd) in cs]; _vec_logprior(k.prior, x)]) - log(length(cs) + 1)
+    end
+    probs(lw) = (w = exp.(lw .- maximum(lw)); w ./ sum(w))
+    X = zeros(D, m, P); Xn = similar(X)
+    F = Vector{NTuple{K,Float64}}(undef, P); Fn = similar(F)
+    lw = zeros(P); lwn = similar(lw)
+    ok = true
+    for j in 1:m
+        if j == 1
+            for p in 1:P
+                x = p == P ? ref[:, 1] : propose(1, nothing)
+                X[:, 1, p] = x
+                lp = _vec_logprior(k.prior, x)
+                if isfinite(lp)
+                    F[p], ll = window(nothing, 1, nothing, x)
+                    lw[p] = ll + lp - logq(1, nothing, x)
+                else
+                    F[p] = ntuple(_ -> 0.0, Val(K)); lw[p] = -Inf
+                end
+            end
+        else
+            isfinite(maximum(lw)) || (ok = false; break)
+            w = probs(lw)
+            anc = [_sample_categorical(rng, w) for _ in 1:P]
+            xs = ref[:, j]
+            las = fill(-Inf, P)
+            for q in 1:P
+                isfinite(lw[q]) || continue
+                a, ll = window(F[q], j, X[:, j-1, q], xs)
+                isfinite(ll) || continue
+                d = sum(map(*, a, B[cuts[j] - lo + 2]))
+                d > 0 && (las[q] = lw[q] + ll + log(d))
+            end
+            isfinite(maximum(las)) || (ok = false; break)
+            anc[P] = _sample_categorical(rng, probs(las))
+            for p in 1:P
+                a = anc[p]; prev = X[:, j-1, a]
+                x = p == P ? xs : propose(j, prev)
+                for jj in 1:(j-1), d in 1:D; Xn[d, jj, p] = X[d, jj, a]; end
+                Xn[:, j, p] = x
+                lp = _vec_logprior(k.prior, x)
+                if isfinite(lp)
+                    Fn[p], ll = window(F[a], j, prev, x)
+                    lwn[p] = ll + lp - logq(j, prev, x)
+                else
+                    Fn[p] = F[a]; lwn[p] = -Inf
+                end
+            end
+            X, Xn = Xn, X; F, Fn = Fn, F; lw, lwn = lwn, lw
+        end
+    end
+    if !ok || !isfinite(maximum(lw))
+        S[:, E, i] = ref
+        return false
+    end
+    b = _sample_categorical(rng, probs(lw))
+    S[:, E, i] = X[:, :, b]
+    reads_obs = name in _cache_latents(data)
+    src = (c === nothing || reads_obs) ? _OneFresh(c) : _FromWeights(c)
+    s.hist[i] = _ind_loglik(src, data, model, i) + _ind_param_priors(data, model, i)
+    if c !== nothing && reads_obs
+        for key in 1:data.n_keys; c.shared[key, i] = _obs_shared(data, model, i, key); end
+        for t in lo:hi
+            c.weights[t, i] = _store(data, data.observation(model, data, i, t, c.shared[data.shared_key(t), i]))
+        end
+    end
+    X[:, :, b] != ref
 end
 
 # log of f * (steps l..h) * B, f being the forward vector after l-1 (the start

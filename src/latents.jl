@@ -202,6 +202,11 @@ mutable struct LatentState{V<:NamedTuple}
 end
 
 _new_stamp() = rand(UInt)
+"""
+    restamp!(s::LatentState) -> s
+
+Give `s` a new `stamp`, invalidating likelihood caches. Call after mutating `s.values`.
+"""
 restamp!(s::LatentState) = (s.stamp = _new_stamp(); s)
 Base.copy(s::LatentState) = LatentState(map(copy, s.values), _new_stamp())
 

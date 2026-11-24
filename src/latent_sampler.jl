@@ -44,6 +44,11 @@ function epidemic_latent_sampler(data::LatentHMMData; n_adapt::Integer = 1000, s
                   Dict{Symbol,Float64}(), Dict{Symbol,Float64}(), Dict{Symbol,Float64}())
 end
 
+"""
+    acceptance_rates(sampler) -> Dict{Symbol,Float64}
+
+Acceptance rate per latent from the last call of an [`epidemic_latent_sampler`](@ref).
+"""
 acceptance_rates(s::LatentSampler) = Dict(k => s.accepted[k] / max(s.tried[k], 1) for k in keys(s.tried))
 
 @inline _adapt(s::LatentSampler, x, acc) =

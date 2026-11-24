@@ -13,6 +13,11 @@
 # chain the likelihood scores. `IFFBSProposal` names that chain explicitly so
 # it can be a different one, which `iffbs_mh!` then corrects for.
 
+"""
+    IFFBSProposal(trans_mat, starting_state, observation_process, rest_contribution)
+
+Chain run by the iFFBS forward filter. Build with [`iffbs_proposal`](@ref).
+"""
 struct IFFBSProposal{TM,SS,OP,RC}
     trans_mat::TM              # the chain the filter pushes probability through
     starting_state::SS         # its initial distribution

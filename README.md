@@ -1,6 +1,8 @@
 # EpidemicTrajectories.jl
 
 [![Docs](https://img.shields.io/badge/docs-dev-blue.svg)](https://evoart.github.io/EpidemicTrajectories/dev/)
+[![CI](https://github.com/EvoArt/EpidemicTrajectories/actions/workflows/CI.yml/badge.svg?branch=master)](https://github.com/EvoArt/EpidemicTrajectories/actions/workflows/CI.yml?query=branch%3Amaster)
+[![Coverage](https://codecov.io/gh/EvoArt/EpidemicTrajectories/branch/master/graph/badge.svg)](https://codecov.io/gh/EvoArt/EpidemicTrajectories)
 
 Discrete-time, individual-level epidemic models, built from three pieces:
 

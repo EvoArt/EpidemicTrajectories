@@ -41,3 +41,4 @@ walkthrough_cattle_check.jl
 /*.pdf
 /read_log.py
 /examples/residuals_out/
+/docs/build/
